@@ -4,12 +4,15 @@
 //! duplicated elsewhere.
 #![forbid(unsafe_code)]
 
+pub mod build;
 pub mod constants;
+pub mod context;
 pub mod encoding;
 pub mod error;
 pub mod identity;
 pub mod items;
 pub mod registry;
+pub mod validate;
 
 pub use cv_crypto as crypto;
 pub use error::DecodeError;

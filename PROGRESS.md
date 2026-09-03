@@ -92,3 +92,29 @@ Implementation order: Phases 1–9 under `secrecy = none`, then Phase 10
   re-derivation; two-argument nullifiers (author/node) use the same circuit.
 - Measured (dev build with optimized dependencies, this machine):
   dev setup 0.9 s, **prove 1.3–1.5 s**, verify 13–16 ms, 8499 constraints.
+
+## Phase 3 — Ballots (secrecy = none)  (2026-09-03)
+
+The class-group puzzle of the original Phase 3 no longer exists (BLOCKERS.md
+#1); this phase covers ballot construction and the intrinsic validity rules.
+
+- `cv-core::context`: `Context` trait (referenced objects, deployment
+  constants, `dev_mode`) with an in-memory implementation.
+- `cv-core::validate`: the one implementation of SPEC §6 intrinsic checks for
+  VoteDefinition, Initiative, Support, Ballot (both payload kinds), Anchor
+  (structure and dev gating; proofs in Phase 5), NodeRegistration, Witness;
+  KeyParty/Share return `NotImplemented` until Phase 10. `MissingReference`
+  results feed the orphan pool.
+- `cv-core::build`: deterministic constructors for ballots, supports,
+  initiatives, node registrations, witnesses, and authority signing.
+- Finding recorded as A41 during Phase 2: the arkworks Poseidon sponge has no
+  length padding (`poseidon(x) == poseidon(x, 0)`), so the identity commitment
+  now carries a domain tag.
+- Tests (4 new, 29 total): two builds of the same ballot are byte-identical;
+  a different option is a differing duplicate under the same nullifier; wrong
+  option index, wrong payload length, tampered payload (signal binding),
+  transplanted nullifier, unknown vote, unknown authority, tampered
+  definition, malformed structure are rejected; a re-randomized Groth16 proof
+  keeps the content id and stays valid (A3 demonstrated); non-members cannot
+  build items; initiatives share an author pseudonym; witnesses need a known
+  node key; dev anchors are rejected outside dev mode.

@@ -125,3 +125,18 @@ pub fn constraint_count() -> usize {
         .expect("synthesize");
     cs.num_constraints()
 }
+
+/// Re-randomize a valid proof into a different, equally valid proof (Groth16
+/// malleability). Used by tests to demonstrate why content ids exclude the
+/// proof (ASSUMPTIONS A3).
+pub fn rerandomize<R: RngCore + CryptoRng>(
+    vk: &VerifyingKey<Bn254>,
+    proof: &[u8; PROOF_BYTES],
+    rng: &mut R,
+) -> Option<[u8; PROOF_BYTES]> {
+    let p = Proof::<Bn254>::deserialize_compressed(&proof[..]).ok()?;
+    let p2 = Groth16::<Bn254>::rerandomize_proof(vk, &p, rng);
+    let mut out = Vec::with_capacity(PROOF_BYTES);
+    p2.serialize_compressed(&mut out).ok()?;
+    out.try_into().ok()
+}
