@@ -10,3 +10,8 @@ publish.workspace = true
 [dependencies]
 cv-crypto.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
