@@ -1,4 +1,4 @@
-//! `cv-verifier` CLI: `cv-verifier --snapshot log.snap --headers headers.bin --issuer-key HEX --authority-key HEX --vk membership.vk`
+//! `cv-verifier` CLI: `cv-verifier --snapshot log.snap --headers headers.bin --authority-key HEX --vk membership.vk`
 #![forbid(unsafe_code)]
 
 use clap::Parser;
@@ -22,9 +22,10 @@ struct Args {
     /// Header file (SPEC §15). Required unless --dev.
     #[arg(long)]
     headers: Option<PathBuf>,
-    /// Issuer public key (hex).
-    #[arg(long)]
-    issuer_key: String,
+    /// Only consider registries of these Issuers (hex, repeatable). Omit to
+    /// consider every Issuer in the snapshot; each result names its own.
+    #[arg(long = "issuer-key")]
+    issuer_keys: Vec<String>,
     /// Authority public keys (hex, repeatable).
     #[arg(long = "authority-key")]
     authority_keys: Vec<String>,
@@ -69,7 +70,11 @@ fn main() -> anyhow::Result<()> {
             .iter()
             .map(|k| key(k))
             .collect::<Result<_, _>>()?,
-        issuer_key: key(&args.issuer_key)?,
+        issuer_keys: args
+            .issuer_keys
+            .iter()
+            .map(|k| key(k))
+            .collect::<Result<_, _>>()?,
         dev_mode: args.dev,
     };
     let verifier = match (&args.vk, args.dev) {

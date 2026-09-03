@@ -51,6 +51,8 @@ impl Headers for MockHeaders {
 #[derive(Debug, Clone, Serialize)]
 pub struct InitiativeReport {
     pub initiative_id: String,
+    /// Whose Registry defines this initiative's electorate.
+    pub issuer_key: String,
     pub text: String,
     pub threshold_n: u32,
     pub derived_vote_id: Option<String>,
@@ -103,6 +105,7 @@ pub fn verify(
             let init = cv_core::context::Context::initiative(&view, &id)?;
             Some(InitiativeReport {
                 initiative_id: hex::encode(id),
+                issuer_key: hex::encode(init.issuer_key),
                 text: init.text,
                 threshold_n: init.threshold_n,
                 derived_vote_id: derive_vote(&view, &id).map(|v| hex::encode(v.vote_id())),
@@ -145,21 +148,21 @@ pub fn render(report: &Report) -> String {
             "\nvote {} [{}] {}\n",
             v.vote_id, v.secrecy, v.question
         ));
+        // Who defined this electorate: a result means nothing without it.
+        out.push_str(&format!("  issuer: {}\n", v.issuer_key));
         match v.outcome.as_str() {
             "result" => {
-                out.push_str(&format!(
-                    "  RESULT under guarantee: {}\n",
-                    v.guarantee.as_deref().unwrap_or("?")
-                ));
+                // Every counted ballot is anchored in Bitcoin at or before
+                // close_block; there is no weaker mode to disclose (A16).
+                out.push_str("  RESULT (every counted ballot anchored in Bitcoin)\n");
                 for (o, c) in v.options.iter().zip(v.counts.iter().flatten()) {
                     out.push_str(&format!("    {o}: {c}\n"));
                 }
                 out.push_str(&format!("  counted ballots: {}\n", v.counted.unwrap_or(0)));
             }
             "below_minimum" => out.push_str(&format!(
-                "  no result: {} counted ballots below min_ballots (guarantee: {})\n",
-                v.counted.unwrap_or(0),
-                v.guarantee.as_deref().unwrap_or("?")
+                "  no result: {} anchored ballots, below min_ballots\n",
+                v.counted.unwrap_or(0)
             )),
             "not_closed" => out.push_str("  not closed yet by the supplied headers\n"),
             "pending" => out.push_str(&format!(
@@ -174,6 +177,7 @@ pub fn render(report: &Report) -> String {
             "\ninitiative {} (threshold {}): {} → derived vote {:?}\n",
             i.initiative_id, i.threshold_n, i.text, i.derived_vote_id
         ));
+        out.push_str(&format!("  issuer: {}\n", i.issuer_key));
     }
     out
 }

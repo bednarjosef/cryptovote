@@ -1,15 +1,15 @@
-//! `cv-issuer` binary: development issuer with the mock eID backend.
+//! `cv-issuer` binary: development issuer with the mock verification backend.
 #![forbid(unsafe_code)]
 
 use clap::Parser;
-use cv_issuer::{Issuer, MockEid};
+use cv_issuer::{Issuer, MockBackend};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "cv-issuer",
-    about = "CryptoVote issuer (development: mock eID backend)"
+    about = "CryptoVote issuer (development: mock verification backend)"
 )]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:8450")]
@@ -23,7 +23,7 @@ struct Args {
     /// Nodes to publish the registry to (repeatable).
     #[arg(long = "node")]
     nodes: Vec<String>,
-    /// Required: acknowledges that the mock eID backend accepts anyone.
+    /// Required: acknowledges that the mock backend accepts anyone.
     #[arg(long)]
     dev: bool,
 }
@@ -37,10 +37,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     if !args.dev {
-        anyhow::bail!("only the mock eID backend exists; run with --dev (development only)");
+        anyhow::bail!(
+            "only the mock verification backend exists; run with --dev (development only)"
+        );
     }
     let issuer = match (&args.state, &args.key_seed) {
-        (Some(p), _) if p.exists() => Issuer::load(p, Box::new(MockEid))?,
+        (Some(p), _) if p.exists() => Issuer::load(p, Box::new(MockBackend))?,
         (_, Some(seed)) => {
             let seed: [u8; 32] = hex::decode(seed)?
                 .try_into()
@@ -54,7 +56,10 @@ async fn main() -> anyhow::Result<()> {
             Issuer::dev(seed)
         }
     };
-    println!("issuer public key: {}", hex::encode(issuer.public_key()));
+    println!(
+        "issuer public key (name this as `issuer_key`): {}",
+        hex::encode(issuer.public_key())
+    );
     let handle = cv_issuer::server::start(issuer, args.listen, args.nodes, args.state).await?;
     println!("cv-issuer listening on {}", handle.url());
     tokio::signal::ctrl_c().await?;

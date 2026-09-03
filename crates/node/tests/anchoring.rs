@@ -48,6 +48,7 @@ fn fixture(dev_mode: bool) -> Fixture {
         VoteDefinition {
             question: "Anchor?".into(),
             options: vec!["Yes".into(), "No".into()],
+            issuer_key: issuer.public_key(),
             registry_root: tree.root(),
             open_block: 100,
             close_block: 200,
@@ -60,7 +61,7 @@ fn fixture(dev_mode: bool) -> Fixture {
     );
     let deployment = Deployment {
         authority_keys: vec![authority.public_key()],
-        issuer_key: issuer.public_key(),
+        issuer_keys: vec![issuer.public_key()],
         dev_mode,
     };
     Fixture {
@@ -75,6 +76,7 @@ fn fixture(dev_mode: bool) -> Fixture {
 fn participant(f: &Fixture, i: usize) -> Participant {
     Participant {
         secret: f.secrets[i],
+        issuer_key: f.snapshot.issuer_key,
         registry_root: f.tree.root(),
         index: i as u32,
         siblings: f.tree.path(i as u32).unwrap(),

@@ -1,6 +1,8 @@
 //! Browser entry point. `verify_snapshot(snapshot, headers, config_json)`
-//! returns the report as JSON. `config_json`: `{"issuer_key": hex,
+//! returns the report as JSON. `config_json`: `{"issuer_keys": [hex],
 //! "authority_keys": [hex], "dev_mode": bool, "mock_tip": u32?, "vk": hex?}`.
+//! `issuer_keys` is optional: empty means "every Issuer in the snapshot",
+//! and each result names the Issuer it was computed under.
 
 use crate::{ChainHeaders, Config, MockHeaders, Report, dev_verifier, verify};
 use cv_core::context::Deployment;
@@ -13,7 +15,8 @@ use wasm_bindgen::prelude::*;
 
 #[derive(Deserialize)]
 struct JsConfig {
-    issuer_key: String,
+    #[serde(default)]
+    issuer_keys: Vec<String>,
     #[serde(default)]
     authority_keys: Vec<String>,
     #[serde(default)]
@@ -38,7 +41,11 @@ fn run(snapshot: &[u8], headers: &[u8], config_json: &str) -> Result<Report, Str
             .iter()
             .map(|k| key(k))
             .collect::<Result<_, _>>()?,
-        issuer_key: key(&cfg.issuer_key)?,
+        issuer_keys: cfg
+            .issuer_keys
+            .iter()
+            .map(|k| key(k))
+            .collect::<Result<_, _>>()?,
         dev_mode: cfg.dev_mode,
     };
     let verifier = match (&cfg.vk, cfg.dev_mode) {

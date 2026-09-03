@@ -29,9 +29,6 @@ pub struct NodeConfig {
     /// Also gossip to endpoints found in NodeRegistration items.
     pub gossip_to_registered: bool,
     pub anchor: anchor::AnchorConfig,
-    /// Witness role (whitepaper §9 fallback): sign ballots of open votes
-    /// with this registered node key.
-    pub witness_key: Option<cv_core::crypto::sig::SigningKey>,
     pub mix: mix::MixConfig,
     pub solver: solver::SolverConfig,
 }
@@ -45,7 +42,6 @@ impl Default for NodeConfig {
             gossip_interval: Duration::from_secs(10),
             gossip_to_registered: false,
             anchor: anchor::AnchorConfig::default(),
-            witness_key: None,
             mix: mix::MixConfig::default(),
             solver: solver::SolverConfig::default(),
         }
@@ -69,14 +65,6 @@ impl Node {
     pub fn submit(&self, bytes: &[u8]) -> Result<Accepted, Rejected> {
         let mut log = self.log.lock().unwrap();
         let r = log.insert(bytes);
-        if let Ok(Accepted::New {
-            content_id,
-            item_type: cv_core::items::ItemType::Ballot,
-            ..
-        }) = &r
-        {
-            self.maybe_witness(&mut log, content_id);
-        }
         self.flush_relay(&mut log);
         r
     }
@@ -97,29 +85,6 @@ impl Node {
         let mut log = self.log.lock().unwrap();
         log.headers_changed();
         self.flush_relay(&mut log);
-    }
-
-    /// Whitepaper §9 fallback: a registered node attests it saw the ballot
-    /// before close. Only signs while the vote is open by its own headers.
-    fn maybe_witness(&self, log: &mut Log, content_id: &cv_core::items::Id) {
-        use cv_core::context::Context;
-        let Some(key) = &self.config.witness_key else {
-            return;
-        };
-        let Some(cv_core::items::Item::Ballot(b)) = log.get(content_id).cloned() else {
-            return;
-        };
-        let Some(vd) = log.vote(&b.vote_id) else {
-            return;
-        };
-        let Some(tip) = log.headers().tip_height() else {
-            return;
-        };
-        if tip > vd.close_block || log.node_registration(&key.public_key()).is_none() {
-            return;
-        }
-        let w = cv_core::build::build_witness(key, *content_id, b.vote_id);
-        let _ = log.insert(&cv_core::items::Item::Witness(w).encode());
     }
 
     fn flush_relay(&self, log: &mut Log) {

@@ -2,7 +2,6 @@
 //! guarantee level (anchored / fallback).
 
 use cv_core::build::*;
-use cv_core::constants::WITNESS_THRESHOLD_W;
 use cv_core::context::Deployment;
 use cv_core::crypto::field::{Fr, fr_mod};
 use cv_core::crypto::groth16::{self, dev_keys};
@@ -35,6 +34,7 @@ fn world() -> World {
         VoteDefinition {
             question: "Verify?".into(),
             options: vec!["A".into(), "B".into()],
+            issuer_key: issuer.public_key(),
             registry_root: tree.root(),
             open_block: 100,
             close_block: 200,
@@ -47,7 +47,7 @@ fn world() -> World {
     );
     let deployment = Deployment {
         authority_keys: vec![authority.public_key()],
-        issuer_key: issuer.public_key(),
+        issuer_keys: vec![issuer.public_key()],
         dev_mode: true,
     };
     World {
@@ -62,6 +62,7 @@ fn world() -> World {
 fn participant(w: &World, i: usize) -> Participant {
     Participant {
         secret: w.secrets[i],
+        issuer_key: w.snapshot.issuer_key,
         registry_root: w.tree.root(),
         index: i as u32,
         siblings: w.tree.path(i as u32).unwrap(),
@@ -114,11 +115,10 @@ fn anchored_result_and_guarantee_label() {
     let v = &report.votes[0];
     assert_eq!(v.vote_id, hex::encode(vid));
     assert_eq!(v.outcome, "result");
-    assert_eq!(v.guarantee.as_deref(), Some("anchored"));
     assert_eq!(v.counts, Some(vec![2, 2])); // ballots 1..4: options 1,0,1,0
     assert_eq!(v.counted, Some(4));
     let text = cv_verifier::render(&report);
-    assert!(text.contains("RESULT under guarantee: anchored"));
+    assert!(text.contains("RESULT (every counted ballot anchored in Bitcoin)"));
     assert!(text.contains("WARNING: dev mode"));
     // Filtering by vote id and by an unknown id.
     assert_eq!(
@@ -147,10 +147,11 @@ fn anchored_result_and_guarantee_label() {
     );
 }
 
+/// Without an anchor there is no result to report, however many nodes vouch
+/// for the ballots: the §9 fallback is gone (A16).
 #[test]
-fn fallback_is_labelled() {
+fn unanchored_ballots_are_not_counted() {
     let w = world();
-    let vid = w.vote.vote_id();
     let b1 = plaintext_ballot(dev_keys(), &participant(&w, 1), &w.vote, 0).unwrap();
     let b2 = plaintext_ballot(dev_keys(), &participant(&w, 2), &w.vote, 1).unwrap();
     let mut items = vec![
@@ -158,7 +159,7 @@ fn fallback_is_labelled() {
         Item::Ballot(b1.clone()).encode(),
         Item::Ballot(b2.clone()).encode(),
     ];
-    for i in 0..WITNESS_THRESHOLD_W {
+    for i in 0..3usize {
         let k = SigningKey::from_seed(&[0x30 + i as u8; 32]);
         let reg = build_node_registration(
             dev_keys(),
@@ -172,18 +173,17 @@ fn fallback_is_labelled() {
         )
         .unwrap();
         items.push(Item::NodeRegistration(reg).encode());
-        items.push(Item::Witness(build_witness(&k, b1.content_id(), vid)).encode());
-        items.push(Item::Witness(build_witness(&k, b2.content_id(), vid)).encode());
     }
     let snap = encode_snapshot(std::slice::from_ref(&w.snapshot), &items);
     let report = verify(&snap, Arc::new(MockHeaders { tip: 300 }), config(&w), None).unwrap();
     let v = &report.votes[0];
-    assert_eq!(v.outcome, "result");
-    assert!(
-        v.guarantee.as_deref().unwrap().starts_with("FALLBACK"),
-        "{:?}",
-        v.guarantee
-    );
-    assert_eq!(v.counts, Some(vec![1, 1]));
-    assert!(cv_verifier::render(&report).contains("FALLBACK"));
+    assert_eq!(v.outcome, "below_minimum");
+    assert_eq!(v.counted, Some(0));
+
+    // Anchored by one node — any node — and the same snapshot has a result.
+    items.push(dev_anchor(&[b1.content_id(), b2.content_id()], 150));
+    let snap = encode_snapshot(std::slice::from_ref(&w.snapshot), &items);
+    let report = verify(&snap, Arc::new(MockHeaders { tip: 300 }), config(&w), None).unwrap();
+    assert_eq!(report.votes[0].outcome, "result");
+    assert_eq!(report.votes[0].counts, Some(vec![1, 1]));
 }

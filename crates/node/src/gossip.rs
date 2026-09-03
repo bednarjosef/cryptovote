@@ -62,21 +62,22 @@ async fn sync_peer(node: &Arc<Node>, client: &reqwest::Client, peer: &str) -> an
     for r in regs {
         let known = {
             let log = node.log.lock().unwrap();
-            log.registry_roots()
-                .iter()
-                .any(|root| hex::encode(fr_to_bytes(root)) == r.root)
+            log.registry_ids().iter().any(|(issuer, root)| {
+                hex::encode(issuer) == r.issuer_key && hex::encode(fr_to_bytes(root)) == r.root
+            })
         };
         if known {
             continue;
         }
+        let path = format!("{peer}/v1/registry/{}/{}", r.issuer_key, r.root);
         let snap = client
-            .get(format!("{peer}/v1/registry/{}/snapshot", r.root))
+            .get(format!("{path}/snapshot"))
             .send()
             .await?
             .bytes()
             .await?;
         let leaves = client
-            .get(format!("{peer}/v1/registry/{}/leaves", r.root))
+            .get(format!("{path}/leaves"))
             .send()
             .await?
             .bytes()

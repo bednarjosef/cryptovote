@@ -35,7 +35,8 @@ pub enum ItemType {
     Anchor = 0x05,
     KeyParty = 0x06,
     NodeRegistration = 0x07,
-    Witness = 0x08,
+    // 0x08 was Witness, the §9 fallback carrier. Retired: a node's signature
+    // is not a clock, so anchors are the only source of time (A16).
     Share = 0x09,
 }
 
@@ -49,7 +50,6 @@ impl ItemType {
             0x05 => ItemType::Anchor,
             0x06 => ItemType::KeyParty,
             0x07 => ItemType::NodeRegistration,
-            0x08 => ItemType::Witness,
             0x09 => ItemType::Share,
             other => return Err(DecodeError::ItemType(other)),
         })
@@ -88,6 +88,8 @@ pub enum Origin {
 pub struct VoteDefinition {
     pub question: String,
     pub options: Vec<String>,
+    /// Ed25519 key of the Issuer whose Registry defines the electorate.
+    pub issuer_key: [u8; 32],
     pub registry_root: Fr,
     pub open_block: u32,
     pub close_block: u32,
@@ -99,6 +101,7 @@ pub struct VoteDefinition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Initiative {
     pub text: String,
+    pub issuer_key: [u8; 32],
     pub registry_root: Fr,
     pub threshold_n: u32,
     pub support_deadline_block: u32,
@@ -198,17 +201,10 @@ pub struct NodeRegistration {
     pub operator: String,
     pub country: [u8; 2],
     pub asn: u32,
+    pub issuer_key: [u8; 32],
     pub registry_root: Fr,
     pub nullifier: Fr,
     pub proof: Proof,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Witness {
-    pub content_id: Id,
-    pub vote_id: Id,
-    pub node_key: [u8; 32],
-    pub signature: [u8; 64],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,7 +223,6 @@ pub enum Item {
     Anchor(Anchor),
     KeyParty(KeyParty),
     NodeRegistration(NodeRegistration),
-    Witness(Witness),
     Share(Share),
 }
 
@@ -242,6 +237,7 @@ fn encode_vote(v: &VoteDefinition, w: &mut Writer) -> usize {
     for o in &v.options {
         w.string(o);
     }
+    w.fixed(&v.issuer_key);
     w.fr(&v.registry_root);
     w.u32(v.open_block);
     w.u32(v.close_block);
@@ -273,6 +269,7 @@ fn decode_vote(r: &mut Reader) -> Result<VoteDefinition, DecodeError> {
     for _ in 0..n {
         options.push(r.string(MAX_STRING_BYTES)?);
     }
+    let issuer_key = r.fixed()?;
     let registry_root = r.fr()?;
     let open_block = r.u32()?;
     let close_block = r.u32()?;
@@ -291,6 +288,7 @@ fn decode_vote(r: &mut Reader) -> Result<VoteDefinition, DecodeError> {
     Ok(VoteDefinition {
         question,
         options,
+        issuer_key,
         registry_root,
         open_block,
         close_block,
@@ -302,6 +300,7 @@ fn decode_vote(r: &mut Reader) -> Result<VoteDefinition, DecodeError> {
 
 fn encode_initiative(v: &Initiative, w: &mut Writer) -> usize {
     w.string(&v.text);
+    w.fixed(&v.issuer_key);
     w.fr(&v.registry_root);
     w.u32(v.threshold_n);
     w.u32(v.support_deadline_block);
@@ -315,6 +314,7 @@ fn encode_initiative(v: &Initiative, w: &mut Writer) -> usize {
 fn decode_initiative(r: &mut Reader) -> Result<Initiative, DecodeError> {
     Ok(Initiative {
         text: r.string(MAX_STRING_BYTES)?,
+        issuer_key: r.fixed()?,
         registry_root: r.fr()?,
         threshold_n: r.u32()?,
         support_deadline_block: r.u32()?,
@@ -509,6 +509,7 @@ fn encode_node(v: &NodeRegistration, w: &mut Writer) -> usize {
     w.string(&v.operator);
     w.fixed(&v.country);
     w.u32(v.asn);
+    w.fixed(&v.issuer_key);
     w.fr(&v.registry_root);
     w.fr(&v.nullifier);
     let c = w.len();
@@ -524,27 +525,10 @@ fn decode_node(r: &mut Reader) -> Result<NodeRegistration, DecodeError> {
         operator: r.string(MAX_STRING_BYTES)?,
         country: r.fixed()?,
         asn: r.u32()?,
+        issuer_key: r.fixed()?,
         registry_root: r.fr()?,
         nullifier: r.fr()?,
         proof: Proof(r.fixed()?),
-    })
-}
-
-fn encode_witness(v: &Witness, w: &mut Writer) -> usize {
-    w.fixed(&v.content_id);
-    w.fixed(&v.vote_id);
-    w.fixed(&v.node_key);
-    let c = w.len();
-    w.fixed(&v.signature);
-    c
-}
-
-fn decode_witness(r: &mut Reader) -> Result<Witness, DecodeError> {
-    Ok(Witness {
-        content_id: r.fixed()?,
-        vote_id: r.fixed()?,
-        node_key: r.fixed()?,
-        signature: r.fixed()?,
     })
 }
 
@@ -573,7 +557,6 @@ impl Item {
             Item::Anchor(_) => ItemType::Anchor,
             Item::KeyParty(_) => ItemType::KeyParty,
             Item::NodeRegistration(_) => ItemType::NodeRegistration,
-            Item::Witness(_) => ItemType::Witness,
             Item::Share(_) => ItemType::Share,
         }
     }
@@ -591,7 +574,6 @@ impl Item {
             Item::Anchor(v) => encode_anchor(v, &mut w),
             Item::KeyParty(v) => encode_keyparty(v, &mut w),
             Item::NodeRegistration(v) => encode_node(v, &mut w),
-            Item::Witness(v) => encode_witness(v, &mut w),
             Item::Share(v) => encode_share(v, &mut w),
         };
         (w.into_inner(), content_len)
@@ -629,7 +611,6 @@ impl Item {
             ItemType::Anchor => Item::Anchor(decode_anchor(&mut r)?),
             ItemType::KeyParty => Item::KeyParty(decode_keyparty(&mut r)?),
             ItemType::NodeRegistration => Item::NodeRegistration(decode_node(&mut r)?),
-            ItemType::Witness => Item::Witness(decode_witness(&mut r)?),
             ItemType::Share => Item::Share(decode_share(&mut r)?),
         };
         r.finish()?;
@@ -659,7 +640,6 @@ content_id_for!(Ballot, Ballot);
 content_id_for!(Anchor, Anchor);
 content_id_for!(KeyParty, KeyParty);
 content_id_for!(NodeRegistration, NodeRegistration);
-content_id_for!(Witness, Witness);
 content_id_for!(Share, Share);
 
 /// Parsed `keyparties` ballot payload (SPEC §6.4).

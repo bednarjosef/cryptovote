@@ -46,6 +46,7 @@ fn fixture() -> Fixture {
         VoteDefinition {
             question: "Mix?".into(),
             options: vec!["Yes".into(), "No".into()],
+            issuer_key: issuer.public_key(),
             registry_root: tree.root(),
             open_block: 100,
             close_block: 200,
@@ -60,7 +61,7 @@ fn fixture() -> Fixture {
     chain.set_tip(150);
     let deployment = Deployment {
         authority_keys: vec![authority.public_key()],
-        issuer_key: issuer.public_key(),
+        issuer_keys: vec![issuer.public_key()],
         dev_mode: true,
     };
     let keys = Arc::new(groth16::setup(&mut ChaCha20Rng::from_seed(
@@ -80,6 +81,7 @@ fn fixture() -> Fixture {
 fn participant(f: &Fixture, i: usize) -> Participant {
     Participant {
         secret: f.secrets[i],
+        issuer_key: f.snapshot.issuer_key,
         registry_root: f.tree.root(),
         index: i as u32,
         siblings: f.tree.path(i as u32).unwrap(),
@@ -89,7 +91,7 @@ fn participant(f: &Fixture, i: usize) -> Participant {
 fn device(f: &Fixture, i: usize) -> Device {
     Device {
         secret: f.secrets[i],
-        enrollment: None,
+        enrollments: Vec::new(),
         guard: None,
         guard_since_unix: None,
         keyparty_secrets: Default::default(),
@@ -246,7 +248,10 @@ async fn ballot_through_three_hops_and_decoys_dropped() {
     register(&f, &client, &regs).await;
     tokio::time::sleep(Duration::from_millis(400)).await; // let registrations gossip to all hops
 
-    let mc = MixClient::new(client.clone(), TorSetup::Disabled);
+    let mc = MixClient {
+        dev: true,
+        ..MixClient::new(client.clone(), TorSetup::Disabled)
+    };
     let mut dev = device(&f, 1);
     let report = mc
         .cast_with_retry(
@@ -299,7 +304,10 @@ async fn ballot_through_one_hop_when_only_one_node_is_registered() {
     .await;
     let client = NodeClient::new(h.url());
     register(&f, &client, &[(&spec, h.addr)]).await;
-    let mc = MixClient::new(client.clone(), TorSetup::Disabled);
+    let mc = MixClient {
+        dev: true,
+        ..MixClient::new(client.clone(), TorSetup::Disabled)
+    };
     let mut dev = device(&f, 2);
     let report = mc
         .cast_with_retry(
@@ -378,6 +386,7 @@ async fn hop_crashing_mid_hold_forwards_after_restart() {
     let mc = MixClient {
         hops_per_path: 3,
         paths: 1,
+        dev: true,
         ..MixClient::new(client.clone(), TorSetup::Disabled)
     };
     let mut dev = device(&f, 3);
@@ -466,10 +475,13 @@ async fn tor_unreachable_falls_back_to_direct_and_says_so() {
     .await;
     let client = NodeClient::new(h.url());
     register(&f, &client, &[(&spec, h.addr)]).await;
-    let mc = MixClient::new(
-        client.clone(),
-        TorSetup::Failed("bootstrap timed out".into()),
-    );
+    let mc = MixClient {
+        dev: true,
+        ..MixClient::new(
+            client.clone(),
+            TorSetup::Failed("bootstrap timed out".into()),
+        )
+    };
     assert!(mc.tor_error.as_deref().unwrap().contains("unreachable"));
     let mut dev = device(&f, 4);
     let report = mc
@@ -501,7 +513,10 @@ async fn tor_unreachable_falls_back_to_direct_and_says_so() {
         true,
     )
     .await;
-    let mc2 = MixClient::new(NodeClient::new(h2.url()), TorSetup::Disabled);
+    let mc2 = MixClient {
+        dev: true,
+        ..MixClient::new(NodeClient::new(h2.url()), TorSetup::Disabled)
+    };
     let mut dev = device(&f2, 5);
     let report = mc2
         .cast_with_retry(

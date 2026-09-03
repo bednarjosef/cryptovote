@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod device;
+pub mod evidence;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod light;

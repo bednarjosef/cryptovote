@@ -1,7 +1,7 @@
 # CryptoVote protocol specification — byte-exact formats and rules
 
-Status: **Phase 0 amended (secrecy design), v1 wire format.** This document is
-the normative companion to `whitepaper.md` (v0.3). Where the whitepaper is
+Status: **Phase 0 amended (secrecy design; multiple Issuers), v1 wire format.** This document is
+the normative companion to `whitepaper.md` (v0.5). Where the whitepaper is
 silent or ambiguous, the choice made here is listed in `ASSUMPTIONS.md`.
 Whitepaper §7 (puzzle-derived shared key) is superseded by §10–§11 of this
 document ("key parties"); see `BLOCKERS.md #1` for the reason.
@@ -108,7 +108,6 @@ Every signature in this protocol is over a **domain-prefixed message**:
 |---|---|
 | VoteDefinition (authority) | `"cryptovote/v1/sig/vote" || vote_id` |
 | Registry root (issuer) | `"cryptovote/v1/sig/registry" || epoch(u64) || leaf_count(u64) || root(Fr)` |
-| Witness (node) | `"cryptovote/v1/sig/witness" || content_id || vote_id` |
 | Node transport (mix, gossip) | `"cryptovote/v1/sig/transport" || …` (Phase 7) |
 
 ### 1.7 Ristretto255
@@ -171,7 +170,7 @@ Item := version(u8 = 0x01) || item_type(u8) || body
 | 0x05 | Anchor |
 | 0x06 | KeyParty (secrecy = keyparties) |
 | 0x07 | NodeRegistration |
-| 0x08 | Witness |
+| 0x08 | *retired* (was Witness; rejected on decode) |
 | 0x09 | Share (secrecy = keyparties) |
 
 `item_hash(item) = blake3(Item bytes)` identifies exact bytes (used for gossip
@@ -212,9 +211,18 @@ nullifier(s, tag, id) = poseidon(s, tag_field(tag), id_field)
 |---|---|---|
 | ballot nullifier `n` | `"ballot"` | `fr_mod(vote_id)` |
 | support nullifier `n` | `"support"` | `fr_mod(initiative_id)` |
-| author pseudonym `P` | `"author"` | `0` |
-| node nullifier `n` | `"node"` | `0` |
+| author pseudonym `P` | `"author"` | `fr_mod(issuer_key)` |
+| node nullifier `n` | `"node"` | `fr_mod(issuer_key)` |
 | key-party nullifier `n` | `"keyparty"` | `fr_mod(vote_id)` |
+
+The `id_field` is what scopes a nullifier, and nothing is scoped globally.
+Ballot, support and key-party values are scoped to one vote or initiative —
+and `vote_id` covers `issuer_key` (§6.1) — so a person enrolled by several
+Issuers still has exactly one nullifier per vote. Node registrations and
+author pseudonyms are scoped to the Issuer: one node per person **per
+electorate**, one pseudonym per person per electorate, and no value that ties
+the same person's activity in one electorate to their activity in another
+(A9, A47, A50).
 
 Identity commitment: `C = poseidon(s, tag_field("commit"))`. The arity-1 hash
 is never used anywhere: the sponge has no length padding, so `poseidon(x)`
@@ -275,12 +283,32 @@ leaves file     := C_0 || C_1 || … || C_{leaf_count-1}      (32 bytes each)
 ```
 
 `signature` is Ed25519 over the registry message of §1.6. Nodes verify
-`root` by recomputing the tree from the leaves file. The Issuer's public key
-is a deployment constant; **the Issuer is trusted for the electorate only**
-(whitepaper §2).
+`root` by recomputing the tree from the leaves file, and verify `signature`
+against the `issuer_key` the snapshot itself names. **An Issuer is trusted
+for its own electorate only** (whitepaper §2).
 
-`registry_size(root) = leaf_count` of the snapshot with that root; nodes
-index snapshots by root.
+**Several Issuers coexist.** The protocol privileges none of them: an Issuer
+is just an Ed25519 key that signs roots. Every item that depends on an
+electorate carries the `issuer_key` it relies on (§6.1, §6.2, §6.7), and a
+`registry_root` is usable by that item only if the snapshot with that root
+carries a valid signature by *that* key. Two Issuers may publish the same
+root; they are still different electorates. Snapshots are therefore indexed
+by the pair `(issuer_key, root)`, and `registry_size(issuer_key, root)` is
+the `leaf_count` of that snapshot.
+
+Nodes and verifiers may be configured with a list of Issuers whose registries
+they store (`--issuer-key`, repeatable; empty = any). That is storage policy,
+not a validity rule: it decides which electorates a node serves, never
+whether an item is valid. Because a result means nothing without knowing who
+defined its electorate, **verifiers and clients display the Issuer next to
+every result**.
+
+A person may hold a leaf in several Issuers' registries. This creates no
+double voting: every nullifier is scoped, by `vote_id`/`initiative_id` for
+ballots, supports and key parties (and `vote_id` covers `issuer_key`), and by
+`issuer_key` for node registrations and author pseudonyms (§3.1). So a person
+has exactly one nullifier per vote, one node per electorate, and nothing that
+links their activity in one electorate to another (A9, A47, A50).
 
 ---
 
@@ -334,6 +362,7 @@ Common checks for every item: canonical CVE decoding succeeds (§2), `version`
 ```
 body := question(string)
      || options(list<string>)
+     || issuer_key([32])            -- Ed25519 key of the Issuer of the electorate
      || registry_root(Fr)
      || open_block(u32)
      || close_block(u32)
@@ -354,9 +383,12 @@ Validity:
 - [ ] `2 ≤ options.len() ≤ MAX_OPTIONS (64)`; every option non-empty and pairwise distinct; `question` non-empty.
 - [ ] `open_block < close_block`, `close_block − open_block ≤ MAX_VOTE_BLOCKS (52 560)`.
 - [ ] `secrecy ∈ {0x00, 0x01}`.
-- [ ] `registry_root` is the root of a known, Issuer-signed Registry snapshot (referenced object).
+- [ ] `registry_root` is the root of a known Registry snapshot **of `issuer_key`**: a snapshot with that root carrying a valid signature by that key (referenced object, §4.3).
 - [ ] Authority origin: `authority_key ∈ AUTHORITY_KEYS` (deployment constant, TRUST: authority for *creating* votes only); Ed25519 verifies over the vote message (§1.6).
 - [ ] Initiative origin: the referenced Initiative exists and is valid, and the item bytes equal `canonical(derive_vote(initiative))` of §13 evaluated on the node's current view. If the threshold is not yet reached the item is held in the orphan pool (§7.2), not rejected.
+
+`vote_id` covers `issuer_key`, so the same question over two Issuers'
+registries is two different votes with independent nullifiers (A47).
 
 Under `secrecy = none` the running count is public by design: every ballot
 carries its option index in the clear.
@@ -365,6 +397,7 @@ carries its option index in the clear.
 
 ```
 body := text(string)
+     || issuer_key([32])
      || registry_root(Fr)
      || threshold_N(u32)
      || support_deadline_block(u32)
@@ -377,11 +410,12 @@ initiative_id = content_id = blake3(item bytes without the trailing proof)
 Validity:
 
 - [ ] `text` non-empty; `secrecy ∈ {0x00, 0x01}`.
-- [ ] `registry_root` known (as 6.1).
-- [ ] `threshold_N == initiative_threshold(registry_size(registry_root))` (§14).
-- [ ] `proof` verifies with public inputs `[registry_root, author, tag("author"), 0, fr_mod(initiative_id)]`.
+- [ ] `registry_root` known under `issuer_key` (as 6.1).
+- [ ] `threshold_N == initiative_threshold(registry_size(issuer_key, registry_root))` (§14).
+- [ ] `proof` verifies with public inputs `[registry_root, author, tag("author"), fr_mod(issuer_key), fr_mod(initiative_id)]`.
 
-`author` is a pseudonym, not a nullifier: many valid Initiatives may share it (A9).
+`author` is a pseudonym, not a nullifier: many valid Initiatives may share it
+(A9), including across Issuers (A47).
 
 ### 6.3 Support (0x03)
 
@@ -432,8 +466,8 @@ Validity (intrinsic):
 - [ ] `secrecy = keyparties`: `payload` parses as above; every id in `party_ids` is the `content_id` of a valid KeyParty item for this `vote_id` (else orphan pool); `c1`, `c2` canonical points.
 - [ ] `proof` verifies with `[vote.registry_root, nullifier, tag("ballot"), fr_mod(vote_id), fr_mod(ballot_id)]`.
 
-Counted iff, additionally (§12): anchored at height ≤ `close_block` (or
-witnessed, in fallback); unique nullifier among timely ballots; and, under
+Counted iff, additionally (§12): anchored at height ≤ `close_block`; unique
+nullifier among timely ballots; and, under
 `keyparties`, every declared party was anchored before `open_block` and the
 ballot decrypts to a valid option index.
 
@@ -487,7 +521,7 @@ keyparty_id = content_id = blake3(item bytes without the trailing proof)
 Validity:
 
 - [ ] Referenced VoteDefinition exists, is valid, and has `secrecy = keyparties`.
-- [ ] `registry_root == vote.registry_root`.
+- [ ] `registry_root == vote.registry_root` — a key party carries no `issuer_key` of its own; its electorate is the vote's.
 - [ ] `delay_T ≤ T_CAP`; `modulus` is odd, `2^2047 < N < 2^2048`; `g, h ∈ [2, N−1]`, `poe ∈ [1, N−1]` (`π = 1` is the correct proof when `2^T < l`).
 - [ ] VTC verification of §10.3 passes (proof of exponentiation, challenge set, openings, Lagrange consistency).
 - [ ] `proof` verifies with `[registry_root, nullifier, tag("keyparty"), fr_mod(vote_id), fr_mod(keyparty_id)]`.
@@ -497,37 +531,43 @@ Validity:
 ### 6.7 NodeRegistration (0x07)
 
 ```
-body := node_key([32])        -- Ed25519 (witness signatures, transport)
+body := node_key([32])        -- Ed25519 (transport, node identity)
      || mix_key([32])         -- X25519 (Sphinx hop key)
      || endpoint(string)      -- "host:port" or "xxx.onion:port"
      || operator(string)      -- self-declared operator name
      || country([2])          -- ISO 3166-1 alpha-2, self-declared
      || asn(u32)              -- self-declared autonomous system number
+     || issuer_key([32])
      || registry_root(Fr)
      || nullifier(Fr)
      || proof([128])
 registration_id = content_id = blake3(item bytes without the trailing proof)
 ```
 
-Validity: `registry_root` known; `endpoint` ≤ 256 bytes; `proof` verifies
-with `[registry_root, nullifier, tag("node"), 0, fr_mod(registration_id)]`.
-Duplicates: §7.1 on `nullifier` (one registration per person; a differing
-duplicate invalidates all of that person's registrations, A10).
+Validity: `registry_root` known under `issuer_key`; `endpoint` ≤ 256 bytes;
+`proof` verifies with `[registry_root, nullifier, tag("node"),
+fr_mod(issuer_key), fr_mod(registration_id)]`. Duplicates: §7.1 on
+`(issuer_key, nullifier)` — one registration per person per electorate; a
+differing duplicate invalidates all of that person's registrations in that
+electorate (A10, A50).
+
+**No permission is involved.** Running a node — storing, validating,
+relaying, serving light clients, anchoring — requires no registration and no
+Issuer at all. A registration is a zero-knowledge proof of membership in
+*some* registry (the Issuer neither sees it nor can refuse it), and it is
+needed only to be selected as a mix hop by other people's clients (§11.1).
+Nothing in the counting rule depends on a node's identity at all.
 `operator/country/asn` are used only for hop diversity (privacy), never for
 correctness — `// TRUST: node operator for self-declared diversity attributes (§12)`.
 
-### 6.8 Witness (0x08) — carrier for whitepaper §9 fallback
+### 6.8 *retired* — Witness (0x08)
 
-```
-body := content_id([32]) || vote_id([32]) || node_key([32]) || signature([64])
-witness_id = blake3(item bytes without the trailing signature)
-```
-
-Validity: `node_key` belongs to a valid, non-duplicated NodeRegistration;
-Ed25519 verifies over the witness message (§1.6); the referenced vote exists.
-Semantics: the node attests it held the item `content_id` before the vote's
-`close_block`. Used **only** when no anchor exists for the vote (§12); results
-computed from witnesses are labelled `FALLBACK`.
+Item type `0x08` carried a registered node's signature that it had held an
+item before a vote's `close_block`, so that a vote nobody anchored could still
+be counted (whitepaper §9). It is **removed**: a signature is not a clock, and
+`W` of them were `W` signatures rather than `W` people — anyone able to stand
+up an Issuer could mint the quorum. Decoding `0x08` is an error, and the only
+way a ballot is timely is an Anchor (§6.5, §12) (A16).
 
 ### 6.9 Share (0x09) — secrecy = keyparties, Phase 10
 
@@ -559,8 +599,10 @@ valid ones):
 - **same nullifier, different content id** → double action; **every** item
   with that nullifier is excluded.
 
-Untimely items (not anchored before the deadline) cannot invalidate timely ones
-(A4). Author pseudonyms are exempt (A9).
+Untimely items (not anchored before the deadline) cannot invalidate timely
+ones (A4). Author pseudonyms are exempt (A9). Ballot, Support and KeyParty
+nullifiers are scoped to one vote or initiative, node-registration nullifiers
+to the Issuer, so nothing collides across electorates (§4.3, A47, A50).
 
 ### 7.2 Orphans
 
@@ -573,10 +615,10 @@ from peers by content id.
 ### 7.3 Pruning
 
 After a vote's result has been verified and archived (recorded with its
-`vote_id`, guarantee level, counts, and the ids of the anchors used), a
+`vote_id`, counts, and the ids of the anchors used), a
 non-archival node may delete the vote's Ballots, KeyParties and Shares.
 Anchors, VoteDefinitions, Initiatives, Supports (until their deadline passes
-and any derived vote is archived), NodeRegistrations and Witnesses are kept.
+and any derived vote is archived) and NodeRegistrations are kept.
 
 ---
 
@@ -786,8 +828,9 @@ Issuer's Sybil resistance.
 ## 12. Counting rule (whitepaper §8–§10)
 
 Inputs: a Log snapshot (§15), a header chain, a `vote_id`. Output: one of
-`Result { guarantee, counts }`, `BelowMinimum { guarantee, counted }`,
-`NotClosed`, `Pending { missing_shares }` (keyparties only).
+`Result { counts }`, `BelowMinimum { counted }`, `NotClosed`,
+`Pending { missing_shares }` (keyparties only). Every counted ballot is
+anchored in Bitcoin at or before `close_block`; there is no weaker mode.
 
 ```
 fn tally(snap, headers, vote_id):
@@ -802,17 +845,8 @@ fn tally(snap, headers, vote_id):
     // 2. intrinsically valid ballots of this vote
     ballots = [b for b in snap.ballots if b.vote_id == vote_id and ballot_valid(b, vd, snap)]
 
-    // 3. timeliness and guarantee level
-    anchored = [b for b in ballots if height_of.get(b.id, ∞) <= vd.close_block]
-    if anchored is non-empty or any anchor has height <= vd.close_block:
-        guarantee = ANCHORED
-        timely = anchored
-    else:
-        guarantee = FALLBACK                      // whitepaper §9 degraded mode
-        timely = [b for b in ballots
-                  if |{w.node_key for w in snap.witnesses
-                       if w.content_id == b.id and w.vote_id == vote_id
-                       and witness_valid(w, snap)}| >= W]
+    // 3. timeliness: an anchor at or before close, and nothing else
+    timely = [b for b in ballots if height_of.get(b.id, ∞) <= vd.close_block]
 
     // 4. duplicate rule among timely ballots (§7.1)
     by_null = group timely by nullifier
@@ -836,8 +870,8 @@ fn tally(snap, headers, vote_id):
             if m is None: continue
             counts[m] += 1
 
-    if sum(counts) < vd.min_ballots: return BelowMinimum { guarantee, counted: sum(counts) }
-    return Result { guarantee, counts }
+    if sum(counts) < vd.min_ballots: return BelowMinimum { counted: sum(counts) }
+    return Result { counts }
 ```
 
 Notes:
@@ -867,6 +901,7 @@ fn derive_vote(snap, headers, init) -> Option<VoteDefinition>:
     close = open + INITIATIVE_VOTE_BLOCKS
     return VoteDefinition {
         question: init.text, options: ["Yes", "No"],
+        issuer_key: init.issuer_key,
         registry_root: init.registry_root,
         open_block: open, close_block: close,
         min_ballots: MIN_BALLOTS, secrecy: init.secrecy,
@@ -896,7 +931,6 @@ between the deadline and `open_block` (144 blocks) like for any other vote.
 | `M` | 1.5 | whitepaper §14 |
 | `T_CAP` | `required_delay(3 × MAX_VOTE_BLOCKS)` ≈ 2^53 | whitepaper §14 |
 | `MIN_BALLOTS` | 100 | whitepaper §14 |
-| `W` (fallback witnesses) | 7 | whitepaper §14 |
 | `initiative_threshold(size)` | `ceil(size / 100)` | whitepaper §14 (1 %) |
 | `INITIATIVE_OPEN_DELAY` | 144 blocks (≈ 1 day) | A7 |
 | `INITIATIVE_VOTE_BLOCKS` | 1008 blocks (≈ 1 week) | A7 |
@@ -906,7 +940,7 @@ between the deadline and `open_block` (144 blocks) like for any other vote.
 
 Dev mode (`dev_mode = true`, one flag, warning printed at startup) enables
 exactly: the `0xFF` Dev anchor proof, the deterministic Groth16 setup, the
-mock Issuer, a mock header chain driven by the local clock, and (Phase 10) a
+Issuer's mock verification backend (which accepts any credential), a mock header chain driven by the local clock, and (Phase 10) a
 `DEV_T_MIN` override that lets key parties choose tiny delays. Nothing else
 differs.
 
@@ -920,10 +954,13 @@ Headers  := magic("CVHDR001") || start_height(u32) || headers(list<[80]>)
 ```
 
 Each `registries[i]` is an encoded `RegistrySnapshot` (§4.3; the verifier
-needs signed roots and leaf counts, not the leaves). Each `items[i]` is one
+needs signed roots and leaf counts, not the leaves). A snapshot is kept if it
+carries a valid signature by the `issuer_key` it names — and, when the
+verifier was given an `issuer_keys` list, if it is one of those; the rest are
+counted as rejected. Snapshots of several Issuers may appear in one file. Each `items[i]` is one
 encoded Item (§2). Order is irrelevant: the verifier decodes, validates items
 in dependency order (repeating passes until nothing new validates), and
-applies §12/§13. It prints the guarantee level with every result.
+applies §12/§13. It prints the Issuer with every result.
 
 ---
 
@@ -957,23 +994,29 @@ blake3("abc")                  = 6437b3ac38465133ffb63b75273a8db548c558465d79db0
 ### 17.2 VoteDefinition (Authority origin, secrecy = none)
 
 Inputs: question `"Should the bridge be built?"`, options `["Yes", "No"]`,
-`registry_root = Fr(7)`, `open_block = 900000`, `close_block = 901008`,
-`min_ballots = 100`, `secrecy = 0x00`, authority Ed25519 seed `0x42 × 32`.
+issuer Ed25519 seed `0x11 × 32`, `registry_root = Fr(7)`,
+`open_block = 900000`, `close_block = 901008`, `min_ballots = 100`,
+`secrecy = 0x00`, authority Ed25519 seed `0x42 × 32`.
 
 ```
+issuer key    = d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737
 authority key = 2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12
-unsigned body (128 bytes) =
+unsigned body (160 bytes) =
   0101 1b000000 53686f756c642074686520627269646765206265206275696c743f
   02000000 03000000 596573 02000000 4e6f
+  d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737
   0700000000000000000000000000000000000000000000000000000000000000
   a0bb0d00 90bf0d00 64000000 00
   00 2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12
-vote_id   = 1b85ac5e6f3d29dfca5f4a65c04054c7bec252db66ffaffd052e345ce1c1eb09
-signature = b2ec980b7597e063a7f65473ad0c9cead988dbc19c5279ae6ce2d75952cc6c66
-            2d069bb6df161d2133988b26ca4ad4203ca8c99a91685735e34e7f9dad764306
-item (192 bytes) = unsigned body || signature
-item_hash = e0fdeb2c92f6d5b889ffc59dff319b7a673ce8fd42f03dba2004102dca69c038
+vote_id   = 70564b260d3247815cfd7111a8fc1e074d965d6d08b7a51cd9dce7360cca5b29
+signature = 94b5f892e8c5efdf1670c61b382b0d44c28b9be1098aaf3ff7d0abd4547c488d
+            babd55befc5a53d2321c8ed3b7156ef27765f6f7a2111b21b14dfbf6ba1f4f05
+item (224 bytes) = unsigned body || signature
+item_hash = f5ad47912036b409af3fe10d28d5c065fac78e27015740902d2ea305bdfaf1c3
 ```
+
+Changing only `issuer_key` changes `vote_id`: the same question over another
+Issuer's registry is another vote (§6.1).
 
 ### 17.3 Ballot content preimage (secrecy = none)
 
@@ -981,8 +1024,8 @@ item_hash = e0fdeb2c92f6d5b889ffc59dff319b7a673ce8fd42f03dba2004102dca69c038
 
 ```
 content preimage (71 bytes) =
-  0104 1b85ac5e…c1eb09 0500000000000000000000000000000000000000000000000000000000000000 01000000 01
-ballot_id = b855b6703818caf09bdc43425196236aef1cf4687fc0533ea0d3b7d34eac7aa5
+  0104 70564b26…0cca5b29 0500000000000000000000000000000000000000000000000000000000000000 01000000 01
+ballot_id = 2cb61f84daf5b8480e1a05f59fb14c5a09339d83682b28a363c8111c9d8d2ca7
 ```
 
 ### 17.4 Anchor Merkle tree and Anchor item (Dev proof)
@@ -1004,24 +1047,11 @@ anchor item (107 bytes, height 900500, Dev proof) =
 anchor_id = 465ba7ed5a45d67b4c3ae199bc72273635fedb9c31167c5dbcdcefc7b14825dd
 ```
 
-### 17.5 Witness
-
-Node Ed25519 seed `0x07 × 32`, `content_id = id[0]` above, `vote_id` from 17.2:
-
-```
-node key   = ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c
-item (162 bytes) =
-  0108 10e5cf3d…c1d553 1b85ac5e…c1eb09 ea4a6c63…46d22c
-  c718229e8a39151dd8168cca00e300b56070ab04ce1c1f028ec766a95360a49c
-  4954025a9572fd16caf6aa2821420bc9005fa907c402ff9f4f3f9c192a5dd101
-witness_id = db8b09f07b50ede4d8caf6abd41afefd29c47870f469ba8707de6fdc7763bd64
-```
-
-### 17.6 Receipt
+### 17.5 Receipt
 
 `n = Fr(5)`, `payload = 0x11 × 17`:
 `H_B("receipt"; n || payload) = 625e131a87f09cf2935b4e702ff59a9514b2918fe8bf7e65c349f99e6fd36290`.
 
-### 17.7 Poseidon tag fields
+### 17.6 Poseidon tag fields
 
 See §3.1 table (decimal values are normative).

@@ -21,6 +21,10 @@ pub enum ClientError {
     Status(u16),
     #[error("malformed response: {0}")]
     Malformed(String),
+    #[error("node answered with something other than {0}")]
+    WrongItem(String),
+    #[error("registry from the node is not the one that was asked for: {0}")]
+    BadRegistry(&'static str),
 }
 
 impl NodeClient {
@@ -73,21 +77,37 @@ impl NodeClient {
         }
     }
 
+    /// Fetch an item by content id. The answer is checked against the id that
+    /// was asked for: a node that serves a *different* item — a decoy vote
+    /// with the options swapped, say — is caught here rather than believed
+    /// (whitepaper §12: never trust a single node).
     pub async fn item(&self, content_id: &Id) -> Result<Option<Item>, ClientError> {
         match self
             .get_bytes(format!("/v1/items/{}", hex::encode(content_id)))
             .await?
         {
-            Some(b) => Item::decode(&b)
-                .map(Some)
-                .map_err(|e| ClientError::Malformed(e.to_string())),
+            Some(b) => {
+                let item = Item::decode(&b).map_err(|e| ClientError::Malformed(e.to_string()))?;
+                if item.content_id() != *content_id {
+                    return Err(ClientError::WrongItem(hex::encode(content_id)));
+                }
+                Ok(Some(item))
+            }
             None => Ok(None),
         }
     }
 
+    /// Fetch item bytes by item hash, checking the bytes hash to what was asked.
     pub async fn item_by_hash(&self, item_hash: &Id) -> Result<Option<Vec<u8>>, ClientError> {
-        self.get_bytes(format!("/v1/items/by-hash/{}", hex::encode(item_hash)))
-            .await
+        let bytes = self
+            .get_bytes(format!("/v1/items/by-hash/{}", hex::encode(item_hash)))
+            .await?;
+        if let Some(b) = &bytes {
+            if cv_core::crypto::hash::blake3_hash(b) != *item_hash {
+                return Err(ClientError::WrongItem(hex::encode(item_hash)));
+            }
+        }
+        Ok(bytes)
     }
 
     pub async fn inventory(&self, since: u64, limit: usize) -> Result<Inventory, ClientError> {
@@ -242,19 +262,22 @@ impl NodeClient {
             .await?)
     }
 
+    /// One Issuer's registry: a root alone does not identify an electorate.
     pub async fn registry(
         &self,
+        issuer_key: &[u8; 32],
         root: &Fr,
     ) -> Result<Option<(RegistrySnapshot, Vec<Fr>)>, ClientError> {
+        let issuer_hex = hex::encode(issuer_key);
         let root_hex = hex::encode(fr_to_bytes(root));
         let Some(snap) = self
-            .get_bytes(format!("/v1/registry/{root_hex}/snapshot"))
+            .get_bytes(format!("/v1/registry/{issuer_hex}/{root_hex}/snapshot"))
             .await?
         else {
             return Ok(None);
         };
         let Some(leaves) = self
-            .get_bytes(format!("/v1/registry/{root_hex}/leaves"))
+            .get_bytes(format!("/v1/registry/{issuer_hex}/{root_hex}/leaves"))
             .await?
         else {
             return Ok(None);
@@ -262,6 +285,20 @@ impl NodeClient {
         let snapshot =
             RegistrySnapshot::decode(&snap).map_err(|e| ClientError::Malformed(e.to_string()))?;
         let leaves = decode_leaves(&leaves).map_err(|e| ClientError::Malformed(e.to_string()))?;
+        // The node is not trusted for the electorate: the snapshot must be the
+        // one that was asked for and must carry that Issuer's own signature.
+        if snapshot.issuer_key != *issuer_key {
+            return Err(ClientError::BadRegistry("another issuer"));
+        }
+        if snapshot.root != *root {
+            return Err(ClientError::BadRegistry("another root"));
+        }
+        if !snapshot.verify() {
+            return Err(ClientError::BadRegistry("issuer signature"));
+        }
+        if snapshot.leaf_count != leaves.len() as u64 {
+            return Err(ClientError::BadRegistry("leaf count"));
+        }
         Ok(Some((snapshot, leaves)))
     }
 

@@ -12,6 +12,8 @@ use cv_crypto::sig::{Domain, SigningKey};
 #[derive(Clone, Debug)]
 pub struct Participant {
     pub secret: Fr,
+    /// The Issuer whose Registry this material proves membership of.
+    pub issuer_key: [u8; 32],
     pub registry_root: Fr,
     pub index: u32,
     pub siblings: [Fr; crate::constants::REGISTRY_DEPTH],
@@ -99,9 +101,16 @@ pub fn build_initiative(
     support_deadline_block: u32,
     secrecy: Secrecy,
 ) -> Result<Initiative, Unsatisfiable> {
-    let author = nullifier(&p.secret, TAG_AUTHOR, &Fr::from(0u64));
+    // Scoped to the Issuer: a pseudonym inside one electorate, and nothing
+    // that links the same person's initiatives across electorates (A50).
+    let author = nullifier(
+        &p.secret,
+        TAG_AUTHOR,
+        &cv_crypto::field::fr_mod(&p.issuer_key),
+    );
     let mut i = Initiative {
         text,
+        issuer_key: p.issuer_key,
         registry_root: p.registry_root,
         threshold_n,
         support_deadline_block,
@@ -110,7 +119,13 @@ pub fn build_initiative(
         proof: ZERO_PROOF,
     };
     let content_id = i.content_id();
-    let stmt = MembershipStatement::new(p.registry_root, author, TAG_AUTHOR, None, &content_id);
+    let stmt = MembershipStatement::new(
+        p.registry_root,
+        author,
+        TAG_AUTHOR,
+        Some(&p.issuer_key),
+        &content_id,
+    );
     i.proof = prove_membership(keys, &stmt, &p.witness(), &content_id)?;
     Ok(i)
 }
@@ -127,7 +142,13 @@ pub fn build_node_registration(
     country: [u8; 2],
     asn: u32,
 ) -> Result<NodeRegistration, Unsatisfiable> {
-    let n = nullifier(&p.secret, TAG_NODE, &Fr::from(0u64));
+    // One node registration per person **per electorate** (A50), so someone
+    // enrolled with two Issuers can serve both without invalidating either.
+    let n = nullifier(
+        &p.secret,
+        TAG_NODE,
+        &cv_crypto::field::fr_mod(&p.issuer_key),
+    );
     let mut r = NodeRegistration {
         node_key,
         mix_key,
@@ -135,12 +156,19 @@ pub fn build_node_registration(
         operator,
         country,
         asn,
+        issuer_key: p.issuer_key,
         registry_root: p.registry_root,
         nullifier: n,
         proof: ZERO_PROOF,
     };
     let content_id = r.content_id();
-    let stmt = MembershipStatement::new(p.registry_root, n, TAG_NODE, None, &content_id);
+    let stmt = MembershipStatement::new(
+        p.registry_root,
+        n,
+        TAG_NODE,
+        Some(&p.issuer_key),
+        &content_id,
+    );
     r.proof = prove_membership(keys, &stmt, &p.witness(), &content_id)?;
     Ok(r)
 }
@@ -158,18 +186,6 @@ pub fn sign_vote_definition(authority: &SigningKey, mut v: VoteDefinition) -> Vo
         signature: authority.sign(Domain::Vote, &vote_id),
     };
     v
-}
-
-/// SPEC §6.8.
-pub fn build_witness(node: &SigningKey, content_id: Id, vote_id: Id) -> Witness {
-    let mut payload = content_id.to_vec();
-    payload.extend_from_slice(&vote_id);
-    Witness {
-        content_id,
-        vote_id,
-        node_key: node.public_key(),
-        signature: node.sign(Domain::Witness, &payload),
-    }
 }
 
 /// Register as a key party (SPEC §6.6): generates the party's modulus, the

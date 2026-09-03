@@ -3,7 +3,7 @@
 
 use crate::DecodeError;
 use crate::constants::MAX_ITEM_BYTES;
-use crate::context::{Context, Deployment, RegistryInfo};
+use crate::context::{Context, Deployment, RegistryId, RegistryInfo};
 use crate::crypto::field::{Fr, fr_to_bytes};
 use crate::crypto::groth16::MembershipVerifier;
 use crate::encoding::{Reader, Writer};
@@ -68,7 +68,7 @@ pub struct SnapshotView {
     deployment: Deployment,
     verifier: Arc<MembershipVerifier>,
     headers: Arc<dyn Headers>,
-    registries: HashMap<Fr, RegistryInfo>,
+    registries: HashMap<RegistryId, RegistryInfo>,
     items: HashMap<Id, Item>,
     votes: HashMap<Id, VoteDefinition>,
     initiatives: HashMap<Id, Initiative>,
@@ -76,11 +76,11 @@ pub struct SnapshotView {
     supports_by_initiative: HashMap<Id, Vec<Id>>,
     keyparties_by_vote: HashMap<Id, Vec<Id>>,
     shares_by_keyparty: HashMap<Id, Vec<Id>>,
-    witnesses_by_content: HashMap<Id, Vec<Id>>,
     nodes_by_key: HashMap<[u8; 32], Id>,
-    node_nullifiers: HashMap<[u8; 32], Vec<Id>>,
+    /// `(issuer_key, nullifier)` → registrations: one node per person **per
+    /// electorate** (SPEC §7.1, A50).
+    node_nullifiers: HashMap<([u8; 32], [u8; 32]), Vec<Id>>,
     anchor_height: BTreeMap<Id, u32>,
-    anchor_heights: Vec<u32>,
     pub report: LoadReport,
 }
 
@@ -102,11 +102,9 @@ impl SnapshotView {
             supports_by_initiative: HashMap::new(),
             keyparties_by_vote: HashMap::new(),
             shares_by_keyparty: HashMap::new(),
-            witnesses_by_content: HashMap::new(),
             nodes_by_key: HashMap::new(),
             node_nullifiers: HashMap::new(),
             anchor_height: BTreeMap::new(),
-            anchor_heights: Vec::new(),
             report: LoadReport::default(),
         }
     }
@@ -136,10 +134,13 @@ impl SnapshotView {
     }
 
     pub fn add_registry(&mut self, r: RegistrySnapshot) {
-        // TRUST: Issuer for the electorate (whitepaper §2).
-        if r.verify(&self.deployment.issuer_key) {
+        // TRUST: the Issuer an item names, for that item's electorate
+        // (whitepaper §2). The snapshot must be signed by the key it names;
+        // `issuer_keys` (when set) additionally restricts which Issuers this
+        // verifier will look at.
+        if self.deployment.accepts_issuer(&r.issuer_key) && r.verify() {
             self.registries.insert(
-                r.root,
+                (r.issuer_key, r.root),
                 RegistryInfo {
                     leaf_count: r.leaf_count,
                 },
@@ -203,7 +204,6 @@ impl SnapshotView {
             Item::Ballot(b) => self.ballots_by_vote.entry(b.vote_id).or_default().push(cid),
             Item::Anchor(a) => {
                 let h = a.proof.height();
-                self.anchor_heights.push(h);
                 for leaf in &a.leaves {
                     let e = self.anchor_height.entry(*leaf).or_insert(h);
                     if h < *e {
@@ -219,15 +219,10 @@ impl SnapshotView {
             Item::NodeRegistration(r) => {
                 self.nodes_by_key.insert(r.node_key, cid);
                 self.node_nullifiers
-                    .entry(fr_to_bytes(&r.nullifier))
+                    .entry((r.issuer_key, fr_to_bytes(&r.nullifier)))
                     .or_default()
                     .push(cid);
             }
-            Item::Witness(w) => self
-                .witnesses_by_content
-                .entry(w.content_id)
-                .or_default()
-                .push(cid),
             Item::Share(s) => self
                 .shares_by_keyparty
                 .entry(s.keyparty_id)
@@ -274,8 +269,8 @@ impl Context for SnapshotView {
     fn membership_verifier(&self) -> &MembershipVerifier {
         &self.verifier
     }
-    fn registry(&self, root: &Fr) -> Option<RegistryInfo> {
-        self.registries.get(root).copied()
+    fn registry(&self, issuer_key: &[u8; 32], root: &Fr) -> Option<RegistryInfo> {
+        self.registries.get(&(*issuer_key, *root)).copied()
     }
     fn vote(&self, id: &Id) -> Option<VoteDefinition> {
         self.votes.get(id).cloned()
@@ -294,7 +289,9 @@ impl Context for SnapshotView {
         let Item::NodeRegistration(r) = self.items.get(cid)? else {
             return None;
         };
-        let group = self.node_nullifiers.get(&fr_to_bytes(&r.nullifier))?;
+        let group = self
+            .node_nullifiers
+            .get(&(r.issuer_key, fr_to_bytes(&r.nullifier)))?;
         if group.iter().any(|g| g != cid) {
             return None;
         }
@@ -327,15 +324,6 @@ impl LogView for SnapshotView {
             }
         })
     }
-    fn witnesses_of(&self, content_id: &Id) -> Vec<Witness> {
-        self.collect(self.witnesses_by_content.get(content_id), |i| {
-            if let Item::Witness(w) = i {
-                Some(w.clone())
-            } else {
-                None
-            }
-        })
-    }
     fn keyparties_of(&self, vote_id: &Id) -> Vec<KeyParty> {
         self.collect(self.keyparties_by_vote.get(vote_id), |i| {
             if let Item::KeyParty(k) = i {
@@ -356,9 +344,6 @@ impl LogView for SnapshotView {
     }
     fn anchored_height(&self, content_id: &Id) -> Option<u32> {
         self.anchor_height.get(content_id).copied()
-    }
-    fn any_anchor_at_or_before(&self, height: u32) -> bool {
-        self.anchor_heights.iter().any(|h| *h <= height)
     }
     fn tip_height(&self) -> Option<u32> {
         self.headers.tip_height()

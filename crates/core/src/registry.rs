@@ -128,7 +128,8 @@ pub fn root_from_path(leaf: Fr, index: u32, siblings: &[Fr; REGISTRY_DEPTH]) -> 
     cur
 }
 
-/// Issuer-signed snapshot header (SPEC §4.3).
+/// Issuer-signed snapshot header (SPEC §4.3). It names its own Issuer:
+/// several Issuers coexist and each item on the Log says which one it means.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegistrySnapshot {
     pub epoch: u64,
@@ -160,16 +161,23 @@ impl RegistrySnapshot {
         }
     }
 
-    /// `// TRUST: Issuer for the electorate (whitepaper §2, §5)` — the only
-    /// thing checked here is that the snapshot was signed by the expected key.
-    pub fn verify(&self, expected_issuer: &[u8; 32]) -> bool {
-        &self.issuer_key == expected_issuer
-            && verify(
-                &self.issuer_key,
-                Domain::Registry,
-                &Self::payload(self.epoch, self.leaf_count, &self.root),
-                &self.signature,
-            )
+    /// `// TRUST: the Issuer an item names, for that item's electorate
+    /// (whitepaper §2, §5)` — all that is checked here is that the snapshot
+    /// carries a valid signature by the `issuer_key` it names. Whether that
+    /// Issuer is worth trusting is a question for whoever reads the result,
+    /// which is why every result displays it.
+    pub fn verify(&self) -> bool {
+        verify(
+            &self.issuer_key,
+            Domain::Registry,
+            &Self::payload(self.epoch, self.leaf_count, &self.root),
+            &self.signature,
+        )
+    }
+
+    /// Signed by this specific Issuer (deployment policy, SPEC §4.3).
+    pub fn verify_by(&self, expected_issuer: &[u8; 32]) -> bool {
+        &self.issuer_key == expected_issuer && self.verify()
     }
 
     pub fn encode(&self) -> Vec<u8> {

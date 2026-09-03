@@ -22,7 +22,6 @@ pub const S_MAX_RSA: u64 = 1 << 26;
 pub const T_CAP: u64 = 3 * (MAX_VOTE_BLOCKS as u64) * 600 * S_MAX_RSA * 3 / 2;
 
 pub const MIN_BALLOTS: u32 = 100;
-pub const WITNESS_THRESHOLD_W: usize = 7;
 pub const INITIATIVE_OPEN_DELAY: u32 = 144;
 pub const INITIATIVE_VOTE_BLOCKS: u32 = 1008;
 pub const MIN_CONFIRMATIONS: u32 = 6;

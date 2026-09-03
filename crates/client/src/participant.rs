@@ -3,6 +3,7 @@
 //! this is the direct path.
 
 use crate::device::Device;
+use crate::evidence::{AnchorEvidence, anchor_evidence};
 use crate::light::{ClientError, NodeClient};
 use cv_core::build::*;
 use cv_core::constants::initiative_threshold;
@@ -17,14 +18,18 @@ use std::time::{Duration, Instant};
 pub enum ParticipantError {
     #[error("{0}")]
     Client(#[from] ClientError),
-    #[error("device is not enrolled in registry root {0}")]
-    NotEnrolled(String),
+    #[error("device is not enrolled in issuer {0}'s registry root {1}")]
+    NotEnrolled(String, String),
     #[error("unknown vote")]
     UnknownVote,
     #[error("unknown initiative")]
     UnknownInitiative,
     #[error("registry not available on the node")]
     NoRegistry,
+    #[error("the leaves the node served do not build the signed root")]
+    ForgedLeaves,
+    #[error("the node listed a key party it cannot back with a matching item")]
+    ForgedKeyParty,
     #[error("cannot prove membership: {0}")]
     Prove(#[from] cv_core::crypto::groth16::Unsatisfiable),
     #[error("node rejected the item: {0}")]
@@ -36,8 +41,12 @@ pub enum ParticipantError {
 pub struct ParticipantClient {
     pub node: NodeClient,
     pub keys: Arc<MembershipKeys>,
-    /// Dev mode relaxes the key-party delay requirement (SPEC §10.4).
+    /// Dev mode relaxes the key-party delay requirement (SPEC §10.4) and
+    /// accepts dev anchors as confirmation. Never set it outside dev.
     pub dev: bool,
+    /// Block headers for checking that an anchor is really in Bitcoin. With
+    /// none, a confirmation only proves the ballot is in the anchor's root.
+    pub headers: Option<Arc<dyn cv_core::snapshot::Headers>>,
 }
 
 impl ParticipantClient {
@@ -46,19 +55,22 @@ impl ParticipantClient {
             node,
             keys,
             dev: false,
+            headers: None,
         }
     }
 
-    /// Enroll with an issuer over HTTP (mock eID in dev).
+    /// Enroll with an Issuer over HTTP. `credential` is whatever that
+    /// Issuer's verification backend expects (any non-empty string under the
+    /// mock backend in dev).
     pub async fn enroll(
         &self,
         device: &mut Device,
         issuer_url: &str,
-        eid: &str,
+        credential: &str,
     ) -> Result<EnrollResponse, ParticipantError> {
         let req = EnrollRequest {
-            eid: eid.to_string(),
             commitment: hex::encode(cv_core::crypto::field::fr_to_bytes(&device.commitment())),
+            credential: credential.to_string(),
         };
         let resp = reqwest::Client::new()
             .post(format!("{}/v1/enroll", issuer_url.trim_end_matches('/')))
@@ -76,27 +88,35 @@ impl ParticipantClient {
             .json()
             .await
             .map_err(|e| ParticipantError::Issuer(e.to_string()))?;
-        device.enrollment = Some(crate::device::Enrollment {
-            issuer_url: issuer_url.to_string(),
-            index: r.index,
-        });
+        device.record_enrollment(issuer_url, &r.issuer_key, r.index);
         Ok(r)
     }
 
-    /// Proving material for `root`, fetched from the node.
+    /// Proving material for one Issuer's `root`, fetched from the node.
     pub async fn participant(
         &self,
         device: &Device,
+        issuer_key: &[u8; 32],
         root: &Fr,
     ) -> Result<Participant, ParticipantError> {
         let (_, leaves) = self
             .node
-            .registry(root)
+            .registry(issuer_key, root)
             .await?
             .ok_or(ParticipantError::NoRegistry)?;
-        device.participant(&leaves).ok_or_else(|| {
-            ParticipantError::NotEnrolled(hex::encode(cv_core::crypto::field::fr_to_bytes(root)))
-        })
+        let p = device.participant(issuer_key, &leaves).ok_or_else(|| {
+            ParticipantError::NotEnrolled(
+                hex::encode(issuer_key),
+                hex::encode(cv_core::crypto::field::fr_to_bytes(root)),
+            )
+        })?;
+        // `NodeClient::registry` checked the Issuer's signature over the root;
+        // this checks that the leaves it served are the ones under that root,
+        // so a node cannot make the device prove against a tree of its own.
+        if p.registry_root != *root {
+            return Err(ParticipantError::ForgedLeaves);
+        }
+        Ok(p)
     }
 
     fn check(resp: SubmitResponse) -> Result<SubmitResponse, ParticipantError> {
@@ -118,25 +138,63 @@ impl ParticipantClient {
             .vote(vote_id)
             .await?
             .ok_or(ParticipantError::UnknownVote)?;
-        let p = self.participant(device, &vd.registry_root).await?;
+        let p = self
+            .participant(device, &vd.issuer_key, &vd.registry_root)
+            .await?;
         let ballot = prepare_ballot(&self.node, &self.keys, &p, &vd, option, self.dev).await?;
         let resp = Self::check(self.node.submit_item(&Item::Ballot(ballot.clone())).await?)?;
         Ok((ballot, resp))
     }
 
-    /// Poll until the nullifier appears under an anchor (whitepaper §12
-    /// "client responsibility"). Returns the anchor height.
+    /// Poll until the ballot is anchored (whitepaper §12 "client
+    /// responsibility"), and **check the anchor** rather than believe the
+    /// node's answer: a node that dropped the ballot would otherwise just say
+    /// "anchored" and the voter would stop resending. Returns the evidence.
+    pub async fn confirm_evidence(
+        &self,
+        ballot: &Ballot,
+        timeout: Duration,
+    ) -> Result<Option<AnchorEvidence>, ParticipantError> {
+        let content_id = ballot.content_id();
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(e) =
+                anchor_evidence(&self.node, &content_id, self.headers.as_deref(), self.dev).await?
+            {
+                return Ok(Some(e));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// The height of a checked anchor covering the voter's own ballot, or
+    /// `None` if nothing checkable turned up in time.
     pub async fn confirm(
         &self,
         vote_id: &Id,
         nullifier: &Fr,
         timeout: Duration,
     ) -> Result<Option<u32>, ParticipantError> {
+        // The voter's own ballot is identified by content id; ask the node
+        // which ones carry this nullifier, then check each candidate. A node
+        // can invent candidates, but not evidence for them.
         let deadline = Instant::now() + timeout;
         loop {
-            let st = self.node.ballot_status(vote_id, nullifier).await?;
-            if let Some(h) = st.iter().filter_map(|s| s.anchored_height).min() {
-                return Ok(Some(h));
+            for s in self.node.ballot_status(vote_id, nullifier).await? {
+                let Ok(cid) = hex::decode(&s.content_id) else {
+                    continue;
+                };
+                let Ok(cid): Result<Id, _> = cid.try_into() else {
+                    continue;
+                };
+                if let Some(e) =
+                    anchor_evidence(&self.node, &cid, self.headers.as_deref(), self.dev).await?
+                {
+                    return Ok(Some(e.height));
+                }
             }
             if Instant::now() >= deadline {
                 return Ok(None);
@@ -153,15 +211,47 @@ impl ParticipantClient {
         let Some(Item::Initiative(init)) = self.node.item(initiative_id).await? else {
             return Err(ParticipantError::UnknownInitiative);
         };
-        let p = self.participant(device, &init.registry_root).await?;
+        let p = self
+            .participant(device, &init.issuer_key, &init.registry_root)
+            .await?;
         let s = build_support(&self.keys, &p, initiative_id)?;
         let resp = Self::check(self.node.submit_item(&Item::Support(s.clone())).await?)?;
         Ok((s, resp))
     }
 
+    /// Publish a NodeRegistration for a node this person operates (SPEC §6.7).
+    /// It proves membership of `issuer_key`'s registry in zero knowledge — the
+    /// Issuer is not asked and never learns of it — and it is what lets other
+    /// people's clients pick this node as a mix hop.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_node(
+        &self,
+        device: &Device,
+        issuer_key: &[u8; 32],
+        root: &Fr,
+        node_key: [u8; 32],
+        mix_key: [u8; 32],
+        endpoint: String,
+        operator: String,
+        country: [u8; 2],
+        asn: u32,
+    ) -> Result<(NodeRegistration, SubmitResponse), ParticipantError> {
+        let p = self.participant(device, issuer_key, root).await?;
+        let reg = build_node_registration(
+            &self.keys, &p, node_key, mix_key, endpoint, operator, country, asn,
+        )?;
+        let resp = Self::check(
+            self.node
+                .submit_item(&Item::NodeRegistration(reg.clone()))
+                .await?,
+        )?;
+        Ok((reg, resp))
+    }
+
     pub async fn create_initiative(
         &self,
         device: &Device,
+        issuer_key: &[u8; 32],
         root: &Fr,
         text: String,
         support_deadline_block: u32,
@@ -169,10 +259,10 @@ impl ParticipantClient {
     ) -> Result<(Initiative, SubmitResponse), ParticipantError> {
         let (snapshot, _) = self
             .node
-            .registry(root)
+            .registry(issuer_key, root)
             .await?
             .ok_or(ParticipantError::NoRegistry)?;
-        let p = self.participant(device, root).await?;
+        let p = self.participant(device, issuer_key, root).await?;
         let n = initiative_threshold(snapshot.leaf_count);
         let i = build_initiative(&self.keys, &p, text, n, support_deadline_block, secrecy)?;
         let resp = Self::check(self.node.submit_item(&Item::Initiative(i.clone())).await?)?;
@@ -233,13 +323,19 @@ fn crockford(bytes: &[u8]) -> String {
 /// Key parties a client encrypts to (SPEC §11.1): listed by the node after
 /// the duplicate rule, anchored before `open_block`, with a sufficient delay
 /// (relaxed in dev mode), at most `MAX_KEY_PARTIES`.
+///
+/// The listing is only a hint: every `pk` a ballot is encrypted to is taken
+/// from the KeyParty item itself (fetched by content id, so the node cannot
+/// substitute one), never from the summary. A node that swaps in a key of its
+/// own would otherwise make the ballot undecryptable and uncounted.
 pub async fn select_parties(
     node: &NodeClient,
     vd: &VoteDefinition,
     dev: bool,
 ) -> Result<Vec<(Id, [u8; 32])>, ParticipantError> {
+    let vote_id = vd.vote_id();
     let mut out: Vec<(Id, [u8; 32])> = Vec::new();
-    for k in node.keyparties(&vd.vote_id()).await? {
+    for k in node.keyparties(&vote_id).await? {
         let Some(h) = k.anchored_height else { continue };
         if h >= vd.open_block {
             continue;
@@ -248,14 +344,19 @@ pub async fn select_parties(
         {
             continue;
         }
-        let (Ok(id), Ok(pk)) = (hex::decode(&k.keyparty_id), hex::decode(&k.pk)) else {
+        let Ok(id) = hex::decode(&k.keyparty_id) else {
             continue;
         };
-        let (Ok(id), Ok(pk)): (Result<Id, _>, Result<[u8; 32], _>) = (id.try_into(), pk.try_into())
-        else {
+        let Ok(id): Result<Id, _> = id.try_into() else {
             continue;
         };
-        out.push((id, pk));
+        let Some(Item::KeyParty(kp)) = node.item(&id).await? else {
+            return Err(ParticipantError::ForgedKeyParty);
+        };
+        if kp.vote_id != vote_id {
+            return Err(ParticipantError::ForgedKeyParty);
+        }
+        out.push((id, kp.pk));
     }
     out.sort();
     out.truncate(cv_core::constants::MAX_KEY_PARTIES);
@@ -294,7 +395,9 @@ impl ParticipantClient {
             .vote(vote_id)
             .await?
             .ok_or(ParticipantError::UnknownVote)?;
-        let p = self.participant(device, &vd.registry_root).await?;
+        let p = self
+            .participant(device, &vd.issuer_key, &vd.registry_root)
+            .await?;
         let (kp, sk) = build_keyparty(&self.keys, &p, vote_id, delay_t, &mut rand::rngs::OsRng)?;
         let resp = Self::check(self.node.submit_item(&Item::KeyParty(kp.clone())).await?)?;
         device

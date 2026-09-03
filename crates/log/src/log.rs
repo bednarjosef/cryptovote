@@ -3,7 +3,7 @@
 use crate::headers::HeaderSource;
 use crate::store::{Store, StoreError};
 use cv_core::DecodeError;
-use cv_core::context::{Context, Deployment, RegistryInfo};
+use cv_core::context::{Context, Deployment, RegistryId, RegistryInfo};
 use cv_core::crypto::field::{Fr, fr_to_bytes};
 use cv_core::crypto::groth16::{MembershipKeys, MembershipVerifier};
 use cv_core::crypto::hash::blake3_hash;
@@ -17,8 +17,12 @@ use std::sync::{Arc, OnceLock};
 
 /// Bound on the orphan pool (SPEC §7.2).
 pub const MAX_ORPHANS: usize = 10_000;
-/// Nullifier scope for node registrations (no vote/initiative).
-pub const NODE_SCOPE: Id = [0u8; 32];
+/// Node registrations are scoped by Issuer, not by vote: one node per person
+/// per electorate (SPEC §7.1, A50).
+fn node_scope(r: &NodeRegistration) -> Id {
+    r.issuer_key
+}
+
 pub use cv_core::snapshot::SNAPSHOT_MAGIC;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +53,10 @@ pub enum Rejected {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
-    #[error("issuer signature does not verify")]
+    #[error("snapshot is not signed by the issuer key it names")]
     BadSignature,
+    #[error("this node does not carry registries of that issuer")]
+    UnknownIssuer,
     #[error("leaf count does not match the leaves file")]
     LeafCount,
     #[error("root does not match the leaves")]
@@ -140,7 +146,7 @@ pub struct Log {
     hash_of: HashMap<Id, (Id, u64)>,
     by_hash: HashMap<Id, Id>,
     order: BTreeMap<u64, Id>,
-    registries: HashMap<Fr, RegistryEntry>,
+    registries: HashMap<RegistryId, RegistryEntry>,
     votes: HashMap<Id, VoteDefinition>,
     initiatives: HashMap<Id, Initiative>,
     by_vote: HashMap<Id, VoteIndex>,
@@ -149,7 +155,6 @@ pub struct Log {
     nodes_by_key: HashMap<[u8; 32], Id>,
     anchors: Vec<Id>,
     anchor_height: HashMap<Id, u32>,
-    witnesses_by_content: HashMap<Id, Vec<Id>>,
     shares_by_keyparty: HashMap<Id, Vec<Id>>,
     orphans: OrphanPool,
     archived: HashMap<Id, Vec<u8>>,
@@ -184,7 +189,6 @@ impl Log {
             nodes_by_key: HashMap::new(),
             anchors: Vec::new(),
             anchor_height: HashMap::new(),
-            witnesses_by_content: HashMap::new(),
             shares_by_keyparty: HashMap::new(),
             orphans: OrphanPool::default(),
             archived: HashMap::new(),
@@ -196,7 +200,7 @@ impl Log {
                 let leaves_key = key.replace("/snapshot", "/leaves");
                 let leaves = decode_leaves(&log.store.get_meta(&leaves_key)?.unwrap_or_default())?;
                 log.registries.insert(
-                    snapshot.root,
+                    (snapshot.issuer_key, snapshot.root),
                     RegistryEntry {
                         snapshot,
                         leaves,
@@ -242,14 +246,19 @@ impl Log {
 
     // ------------------------------------------------------------------ registry
 
-    /// Add an Issuer-signed Registry snapshot with its leaves file.
+    /// Add a Registry snapshot with its leaves file. Several Issuers may
+    /// publish registries to the same node; each is stored under its own key.
     pub fn add_registry(
         &mut self,
         snapshot: RegistrySnapshot,
         leaves: Vec<Fr>,
     ) -> Result<(), RegistryError> {
-        // TRUST: Issuer for the electorate (whitepaper §2) — only the signature is checked.
-        if !snapshot.verify(&self.deployment.issuer_key) {
+        // TRUST: the Issuer an item names, for that item's electorate
+        // (whitepaper §2) — only the signature by the named key is checked.
+        if !self.deployment.accepts_issuer(&snapshot.issuer_key) {
+            return Err(RegistryError::UnknownIssuer);
+        }
+        if !snapshot.verify() {
             return Err(RegistryError::BadSignature);
         }
         if snapshot.leaf_count != leaves.len() as u64 {
@@ -259,8 +268,12 @@ impl Log {
         if tree.root() != snapshot.root {
             return Err(RegistryError::Root);
         }
-        let root = snapshot.root;
-        let key = format!("registry/{}", hex::encode(fr_to_bytes(&root)));
+        let id = (snapshot.issuer_key, snapshot.root);
+        let key = format!(
+            "registry/{}/{}",
+            hex::encode(id.0),
+            hex::encode(fr_to_bytes(&id.1))
+        );
         self.store
             .put_meta(&format!("{key}/snapshot"), &snapshot.encode())?;
         self.store
@@ -271,29 +284,30 @@ impl Log {
             tree: OnceLock::new(),
         };
         entry.tree.set(tree).ok();
-        self.registries.insert(root, entry);
-        for bytes in self.orphans.take(&Reference::Registry(root)) {
+        self.registries.insert(id, entry);
+        for bytes in self.orphans.take(&Reference::Registry(id.0, id.1)) {
             let _ = self.insert(&bytes);
         }
         Ok(())
     }
 
-    pub fn registry_snapshot(&self, root: &Fr) -> Option<&RegistrySnapshot> {
-        self.registries.get(root).map(|e| &e.snapshot)
+    pub fn registry_snapshot(&self, id: &RegistryId) -> Option<&RegistrySnapshot> {
+        self.registries.get(id).map(|e| &e.snapshot)
     }
 
-    pub fn registry_leaves(&self, root: &Fr) -> Option<&[Fr]> {
-        self.registries.get(root).map(|e| e.leaves.as_slice())
+    pub fn registry_leaves(&self, id: &RegistryId) -> Option<&[Fr]> {
+        self.registries.get(id).map(|e| e.leaves.as_slice())
     }
 
-    pub fn registry_tree(&self, root: &Fr) -> Option<&RegistryTree> {
-        self.registries.get(root).map(|e| {
+    pub fn registry_tree(&self, id: &RegistryId) -> Option<&RegistryTree> {
+        self.registries.get(id).map(|e| {
             e.tree
                 .get_or_init(|| RegistryTree::from_leaves(e.leaves.clone()))
         })
     }
 
-    pub fn registry_roots(&self) -> Vec<Fr> {
+    /// Every `(issuer_key, root)` this node carries.
+    pub fn registry_ids(&self) -> Vec<RegistryId> {
         self.registries.keys().copied().collect()
     }
 
@@ -459,13 +473,7 @@ impl Log {
             Item::NodeRegistration(r) => {
                 self.nodes_by_key.insert(r.node_key, content_id);
                 self.nullifiers
-                    .entry((NODE_SCOPE, fr_to_bytes(&r.nullifier)))
-                    .or_default()
-                    .push(content_id);
-            }
-            Item::Witness(w) => {
-                self.witnesses_by_content
-                    .entry(w.content_id)
+                    .entry((node_scope(r), fr_to_bytes(&r.nullifier)))
                     .or_default()
                     .push(content_id);
             }
@@ -592,20 +600,6 @@ impl Log {
                 _ => None,
             })
             .collect()
-    }
-
-    pub fn witnesses_of(&self, content_id: &Id) -> Vec<&Witness> {
-        self.witnesses_by_content
-            .get(content_id)
-            .map(|v| {
-                v.iter()
-                    .filter_map(|id| match self.items.get(id) {
-                        Some(Item::Witness(w)) => Some(w),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     /// Content ids of all node registrations (valid or not; callers apply
@@ -771,10 +765,6 @@ impl Log {
             .collect();
         cv_core::snapshot::encode_snapshot(&regs, &items)
     }
-
-    pub fn any_anchor_at_or_before(&self, height: u32) -> bool {
-        self.anchors().iter().any(|a| a.proof.height() <= height)
-    }
 }
 
 impl Context for Log {
@@ -784,10 +774,12 @@ impl Context for Log {
     fn membership_verifier(&self) -> &MembershipVerifier {
         &self.keys.verifier
     }
-    fn registry(&self, root: &Fr) -> Option<RegistryInfo> {
-        self.registries.get(root).map(|e| RegistryInfo {
-            leaf_count: e.snapshot.leaf_count,
-        })
+    fn registry(&self, issuer_key: &[u8; 32], root: &Fr) -> Option<RegistryInfo> {
+        self.registries
+            .get(&(*issuer_key, *root))
+            .map(|e| RegistryInfo {
+                leaf_count: e.snapshot.leaf_count,
+            })
     }
     fn vote(&self, id: &Id) -> Option<VoteDefinition> {
         self.votes.get(id).cloned()
@@ -807,8 +799,8 @@ impl Context for Log {
             return None;
         };
         // Duplicate rule (SPEC §7.1): a differing registration under the same
-        // nullifier invalidates all of them.
-        let group = self.nullifier_group(&NODE_SCOPE, &r.nullifier);
+        // nullifier, in the same electorate, invalidates all of them.
+        let group = self.nullifier_group(&node_scope(r), &r.nullifier);
         if group.iter().any(|g| g != cid) {
             return None;
         }
@@ -835,12 +827,6 @@ impl LogView for Log {
             .cloned()
             .collect()
     }
-    fn witnesses_of(&self, content_id: &Id) -> Vec<Witness> {
-        Log::witnesses_of(self, content_id)
-            .into_iter()
-            .cloned()
-            .collect()
-    }
     fn keyparties_of(&self, vote_id: &Id) -> Vec<KeyParty> {
         Log::keyparties_of(self, vote_id)
             .into_iter()
@@ -855,9 +841,6 @@ impl LogView for Log {
     }
     fn anchored_height(&self, content_id: &Id) -> Option<u32> {
         Log::anchored_height(self, content_id)
-    }
-    fn any_anchor_at_or_before(&self, height: u32) -> bool {
-        Log::any_anchor_at_or_before(self, height)
     }
     fn tip_height(&self) -> Option<u32> {
         self.headers.tip_height()

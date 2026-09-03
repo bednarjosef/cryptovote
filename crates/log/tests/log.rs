@@ -39,6 +39,7 @@ fn fixture() -> Fixture {
         VoteDefinition {
             question: "Q?".into(),
             options: vec!["Yes".into(), "No".into()],
+            issuer_key: issuer.public_key(),
             registry_root: tree.root(),
             open_block: 100,
             close_block: 200,
@@ -65,7 +66,7 @@ fn fixture() -> Fixture {
 fn deployment(f: &Fixture) -> Deployment {
     Deployment {
         authority_keys: vec![f.authority.public_key()],
-        issuer_key: f.issuer.public_key(),
+        issuer_keys: vec![f.issuer.public_key()],
         dev_mode: true,
     }
 }
@@ -85,6 +86,7 @@ fn open_log(f: &Fixture, store: Box<dyn Store>) -> Log {
 fn participant(f: &Fixture, i: usize) -> Participant {
     Participant {
         secret: f.secrets[i],
+        issuer_key: f.issuer.public_key(),
         registry_root: f.tree.root(),
         index: i as u32,
         siblings: f.tree.path(i as u32).unwrap(),
@@ -114,16 +116,23 @@ fn insert_dedup_orphans_duplicates_prune() {
     let vote_bytes = Item::VoteDefinition(f.vote.clone()).encode();
     assert!(matches!(
         log.insert(&vote_bytes).unwrap(),
-        Accepted::Orphaned(Reference::Registry(_))
+        Accepted::Orphaned(Reference::Registry(..))
     ));
 
-    // Registry arrives: vote resolves, then the ballot cascades.
-    let bad_issuer = SigningKey::from_seed(&[9u8; 32]);
+    // Registry arrives. An Issuer this node does not carry is refused …
+    let other_issuer = SigningKey::from_seed(&[9u8; 32]);
     assert!(matches!(
         log.add_registry(
-            RegistrySnapshot::sign(&bad_issuer, 1, &f.tree),
+            RegistrySnapshot::sign(&other_issuer, 1, &f.tree),
             f.tree.leaves().to_vec()
         ),
+        Err(RegistryError::UnknownIssuer)
+    ));
+    // … and so is a snapshot that does not carry the signature it claims.
+    let mut forged = f.snapshot.clone();
+    forged.signature[0] ^= 1;
+    assert!(matches!(
+        log.add_registry(forged, f.tree.leaves().to_vec()),
         Err(RegistryError::BadSignature)
     ));
     log.add_registry(f.snapshot.clone(), f.tree.leaves().to_vec())
@@ -274,21 +283,14 @@ fn node_registration_duplicates_and_witnesses() {
     ));
     use cv_core::context::Context;
     assert!(log.node_registration(&k1.public_key()).is_some());
-    // A witness by that node validates.
-    let w = build_witness(&k1, [5; 32], f.vote.vote_id());
-    assert!(is_new(&log.insert(&Item::Witness(w).encode()).unwrap()));
-    // The same person registers a different key: both registrations become invalid.
+    // The same person registers a different key in the same electorate: both
+    // registrations become invalid (SPEC §7.1).
     let r2 = mk(&k2, "b:2");
     assert!(is_new(
         &log.insert(&Item::NodeRegistration(r2).encode()).unwrap()
     ));
     assert!(log.node_registration(&k1.public_key()).is_none());
     assert!(log.node_registration(&k2.public_key()).is_none());
-    let w2 = build_witness(&k1, [6; 32], f.vote.vote_id());
-    assert!(matches!(
-        log.insert(&Item::Witness(w2).encode()).unwrap(),
-        Accepted::Orphaned(Reference::NodeRegistration(_))
-    ));
 }
 
 #[test]
@@ -313,10 +315,11 @@ fn redb_persistence_survives_reopen() {
     assert_eq!(log.len(), n_items);
     assert_eq!(log.latest_seq(), seq);
     assert_eq!(log.ballots_of(&vid).len(), 3);
-    assert!(log.registry_snapshot(&f.tree.root()).is_some());
-    assert_eq!(log.registry_leaves(&f.tree.root()).unwrap().len(), 12);
-    assert_eq!(
-        log.registry_tree(&f.tree.root()).unwrap().root(),
-        f.tree.root()
-    );
+    let id = (f.issuer.public_key(), f.tree.root());
+    assert!(log.registry_snapshot(&id).is_some());
+    assert_eq!(log.registry_leaves(&id).unwrap().len(), 12);
+    assert_eq!(log.registry_tree(&id).unwrap().root(), f.tree.root());
+    // The same root under an Issuer this node never heard of is a different
+    // registry, and is not there.
+    assert!(log.registry_snapshot(&([7u8; 32], f.tree.root())).is_none());
 }

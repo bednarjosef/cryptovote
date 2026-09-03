@@ -1,7 +1,7 @@
-//! HTTP front of the issuer: enrollment with the (mock) eID backend, the
-//! registry files, and publication to nodes.
+//! HTTP front of the issuer: enrollment through the verification backend,
+//! the registry files, and publication to nodes.
 
-use crate::{Issuer, parse_commitment};
+use crate::{EnrollmentRequest, Issuer, IssuerError, parse_commitment};
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -54,22 +54,30 @@ async fn enroll(State(st): State<Arc<IssuerServer>>, Json(req): Json<EnrollReque
         Ok(c) => c,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
+    let request = EnrollmentRequest {
+        commitment,
+        credential: &req.credential,
+    };
     let resp = {
         let mut i = st.issuer.lock().unwrap();
         // TRUST: Issuer decides who is one eligible person (whitepaper §2).
-        match i.enroll(&req.eid, commitment) {
-            Ok((index, replaced)) => {
+        match i.enroll(&request) {
+            Ok(e) => {
                 if let Some(p) = &st.state_path {
                     let _ = i.save(p);
                 }
                 EnrollResponse {
-                    index,
+                    issuer_key: hex::encode(i.public_key()),
+                    index: e.index,
                     epoch: i.epoch(),
                     root: hex::encode(fr_to_bytes(&i.tree().root())),
-                    replaced,
+                    replaced: e.replaced,
                 }
             }
-            Err(e) => return (StatusCode::FORBIDDEN, e.to_string()).into_response(),
+            Err(e @ IssuerError::Rejected(_)) => {
+                return (StatusCode::FORBIDDEN, e.to_string()).into_response();
+            }
+            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         }
     };
     publish_all(&st).await;

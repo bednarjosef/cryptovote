@@ -58,7 +58,7 @@ async fn keyparties_vote_end_to_end() {
     chain.set_tip(90); // before open_block: key parties register now
     let deployment = Deployment {
         authority_keys: vec![authority.public_key()],
-        issuer_key: issuer.public_key(),
+        issuer_keys: vec![issuer.public_key()],
         dev_mode: true,
     };
     let log = Log::open(
@@ -89,7 +89,13 @@ async fn keyparties_vote_end_to_end() {
     let mut rng = ChaCha20Rng::from_seed([9u8; 32]);
     let mut devices: Vec<Device> = (0..6).map(|_| Device::generate(&mut rng)).collect();
     for (i, d) in devices.iter().enumerate() {
-        issuer.enroll(&format!("eid-{i}"), d.commitment()).unwrap();
+        let credential = format!("person-{i}");
+        issuer
+            .enroll(&cv_issuer::EnrollmentRequest {
+                commitment: d.commitment(),
+                credential: &credential,
+            })
+            .unwrap();
     }
     client
         .post_registry(&issuer.snapshot(), issuer.leaves())
@@ -101,6 +107,7 @@ async fn keyparties_vote_end_to_end() {
         VoteDefinition {
             question: "Secret?".into(),
             options: vec!["Yes".into(), "No".into(), "Maybe".into()],
+            issuer_key: issuer.public_key(),
             registry_root: root,
             open_block: 100,
             close_block: 200,
@@ -217,7 +224,6 @@ async fn keyparties_vote_end_to_end() {
 
     let r = pc.result(&vid).await.unwrap().unwrap();
     assert_eq!(r.outcome, "result", "{r:?}");
-    assert_eq!(r.guarantee.as_deref(), Some("anchored"));
     assert_eq!(
         r.counts,
         Some(vec![1, 0, 2]),
@@ -233,7 +239,7 @@ async fn keyparties_vote_end_to_end() {
         cv_verifier::Config {
             deployment: Deployment {
                 authority_keys: vec![authority.public_key()],
-                issuer_key: issuer.public_key(),
+                issuer_keys: vec![issuer.public_key()],
                 dev_mode: true,
             },
             verifier: Arc::new(keys.verifier.clone()),

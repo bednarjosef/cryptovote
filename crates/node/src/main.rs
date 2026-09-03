@@ -38,9 +38,10 @@ struct Args {
     /// Authority public keys allowed to create votes (hex, repeatable).
     #[arg(long = "authority-key")]
     authority_keys: Vec<String>,
-    /// Issuer public key (hex).
-    #[arg(long, default_value = "")]
-    issuer_key: String,
+    /// Issuers whose registries this node carries (hex, repeatable).
+    /// Omit to carry any Issuer's registry; items always name their own.
+    #[arg(long = "issuer-key")]
+    issuer_keys: Vec<String>,
     /// DEV MODE: mock Bitcoin clock, insecure Groth16 setup, dev anchors.
     #[arg(long)]
     dev: bool,
@@ -74,8 +75,11 @@ struct Args {
     /// Also gossip to endpoints of registered nodes.
     #[arg(long)]
     gossip_to_registered: bool,
-    /// Anchorer role: off | dev | ots.
-    #[arg(long, default_value = "off")]
+    /// Anchorer role: ots | dev | off. On by default, because an anchor is
+    /// the only clock the protocol has: a vote nobody anchors cannot be
+    /// counted. Anyone may anchor, anchors need no permission and cover
+    /// everyone's items, so one node doing it serves the whole network.
+    #[arg(long, default_value = "on")]
     anchor: String,
     /// Anchoring interval in seconds (whitepaper §14: hourly).
     #[arg(long, default_value_t = 3600)]
@@ -83,12 +87,18 @@ struct Args {
     /// OTS calendar base URLs (repeatable; default: four public calendars).
     #[arg(long = "calendar")]
     calendars: Vec<String>,
-    /// Witness role: seed (hex) of this node's registered Ed25519 key.
+    /// Seed (hex) of this node's Ed25519 identity key — the `node_key` in its
+    /// NodeRegistration. Omit and the node keeps a generated one in its store.
     #[arg(long)]
-    witness_key_seed: Option<String>,
-    /// Mix hop role: seed (hex) of this node's X25519 mix key (the public key goes in the NodeRegistration).
+    node_key_seed: Option<String>,
+    /// Mix hop role: seed (hex) of this node's X25519 mix key (the public key
+    /// goes in the NodeRegistration). Omit and the node keeps a generated key
+    /// in its own store — being a hop is on by default.
     #[arg(long)]
     mix_secret_seed: Option<String>,
+    /// Do not act as a mix hop (relaying ballots for other people's privacy).
+    #[arg(long)]
+    no_mix: bool,
     /// Mix hold parameters (whitepaper §14): minimum seconds, other messages, cap seconds.
     #[arg(long, default_value_t = 3)]
     mix_hold_secs: u64,
@@ -217,11 +227,33 @@ async fn run_subcommand(cmd: Command) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A key the node generates once and keeps in its own store, so its
+/// NodeRegistration stays valid across restarts.
+fn persistent_seed(log: &Log, name: &str) -> anyhow::Result<[u8; 32]> {
+    if let Some(b) = log.get_meta(name)? {
+        if let Ok(seed) = <[u8; 32]>::try_from(b.as_slice()) {
+            return Ok(seed);
+        }
+    }
+    let mut seed = [0u8; 32];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    log.put_meta(name, &seed)?;
+    Ok(seed)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("info".parse()?)
+                // arkworks opens a tracing span per R1CS constraint under the
+                // target "gr1cs". Left at `info` those spans dominate: the
+                // dev Groth16 setup goes from a fraction of a second to
+                // minutes, and the node never finishes starting. Raise it by
+                // hand (RUST_LOG=gr1cs=info) only to debug the circuit.
+                .add_directive("gr1cs=warn".parse()?),
         )
         .init();
     let args = Args::parse();
@@ -234,7 +266,11 @@ async fn main() -> anyhow::Result<()> {
             .iter()
             .map(|k| parse_key(k))
             .collect::<Result<_, _>>()?,
-        issuer_key: parse_key(&args.issuer_key)?,
+        issuer_keys: args
+            .issuer_keys
+            .iter()
+            .map(|k| parse_key(k))
+            .collect::<Result<_, _>>()?,
         dev_mode: args.dev,
     };
     let (keys, headers, header_sync): (
@@ -288,8 +324,16 @@ async fn main() -> anyhow::Result<()> {
         let leaves = decode_leaves(&std::fs::read(l)?)?;
         log.add_registry(snapshot, leaves)?;
     }
+    let node_key = match &args.node_key_seed {
+        Some(seed) => cv_core::crypto::sig::SigningKey::from_seed(&parse_key(seed)?),
+        None => cv_core::crypto::sig::SigningKey::from_seed(&persistent_seed(&log, "node-seed")?),
+    };
     let mode = match args.anchor.as_str() {
         "off" => AnchorMode::Off,
+        // "on" means the real thing in a real deployment, and the mock
+        // anchorer under --dev (where there is no Bitcoin to reach).
+        "on" if args.dev => AnchorMode::Dev,
+        "on" => AnchorMode::Ots,
         "dev" if args.dev => AnchorMode::Dev,
         "dev" => anyhow::bail!("--anchor dev requires --dev"),
         "ots" => AnchorMode::Ots,
@@ -307,20 +351,23 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
         mix: cv_node::mix::MixConfig {
-            secret: match &args.mix_secret_seed {
-                Some(seed) => Some(cv_core::crypto::mix::MixSecret::from_seed(parse_key(seed)?)),
-                None => None,
+            // A mix network is only as good as the number of hops in it, so
+            // every node is a hop unless it opts out. The key is persisted
+            // with the Log, so the node keeps the same mix key across
+            // restarts and its NodeRegistration stays valid.
+            secret: match (&args.mix_secret_seed, args.no_mix) {
+                (_, true) => None,
+                (Some(seed), _) => {
+                    Some(cv_core::crypto::mix::MixSecret::from_seed(parse_key(seed)?))
+                }
+                (None, _) => Some(cv_core::crypto::mix::MixSecret::from_seed(persistent_seed(
+                    &log, "mix-seed",
+                )?)),
             },
             hold_min: Duration::from_secs(args.mix_hold_secs),
             hold_k: args.mix_hold_messages,
             hold_cap: Duration::from_secs(args.mix_hold_cap_secs),
             ..Default::default()
-        },
-        witness_key: match &args.witness_key_seed {
-            Some(seed) => Some(cv_core::crypto::sig::SigningKey::from_seed(&parse_key(
-                seed,
-            )?)),
-            None => None,
         },
         name: args.name,
         listen: args.listen,
@@ -336,6 +383,19 @@ async fn main() -> anyhow::Result<()> {
     };
     let handle = start(config, log).await?;
     println!("cv-node listening on {}", handle.url());
+    println!("node key: {}", hex::encode(node_key.public_key()));
+    match &handle.node.config.mix.secret {
+        Some(secret) => {
+            println!("mix hop:  on, mix key {}", hex::encode(secret.public()));
+            println!(
+                "to be chosen as a hop, the operator publishes a registration:\n  \
+                 cv-client register-node --node-key {} --mix-key {} --endpoint <host:port>",
+                hex::encode(node_key.public_key()),
+                hex::encode(secret.public())
+            );
+        }
+        None => println!("mix hop:  off (--no-mix)"),
+    }
     let node = handle.node.clone();
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let header_task = if let Some(sync) = header_sync {

@@ -17,8 +17,18 @@ async fn simulation_matches_ground_truth() {
     eprintln!("{}", cv_sim::render(&report));
     assert!(report.authority_vote.matches, "{:?}", report.authority_vote);
     assert_eq!(report.authority_vote.verifier_outcome, "result");
-    assert_eq!(report.authority_vote.guarantee.as_deref(), Some("anchored"));
     assert!(report.derived_vote.matches, "{:?}", report.derived_vote);
+    // The second Issuer's electorate: its own vote, counted under its own key.
+    assert!(
+        report.second_issuer_vote.matches,
+        "{:?}",
+        report.second_issuer_vote
+    );
+    assert_eq!(report.second_issuer_vote.verifier_outcome, "result");
+    assert_ne!(
+        report.second_issuer_vote.issuer_key, report.authority_vote.issuer_key,
+        "the two votes are over different electorates"
+    );
     assert_eq!(
         report.derived_vote.verifier_outcome, "below_minimum",
         "derived votes need 100 ballots"

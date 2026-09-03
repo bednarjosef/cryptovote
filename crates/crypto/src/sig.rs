@@ -9,8 +9,6 @@ pub enum Domain {
     Vote,
     /// Issuer signing a Registry root: payload = epoch || leaf_count || root.
     Registry,
-    /// Node witnessing an item: payload = content_id || vote_id.
-    Witness,
     /// Node transport messages (Phase 7).
     Transport,
 }
@@ -20,7 +18,6 @@ impl Domain {
         match self {
             Domain::Vote => b"cryptovote/v1/sig/vote",
             Domain::Registry => b"cryptovote/v1/sig/registry",
-            Domain::Witness => b"cryptovote/v1/sig/witness",
             Domain::Transport => b"cryptovote/v1/sig/transport",
         }
     }
@@ -94,7 +91,7 @@ mod tests {
         let pk = sk.public_key();
         let sig = sk.sign(Domain::Vote, b"payload");
         assert!(verify(&pk, Domain::Vote, b"payload", &sig));
-        assert!(!verify(&pk, Domain::Witness, b"payload", &sig));
+        assert!(!verify(&pk, Domain::Transport, b"payload", &sig));
         assert!(!verify(&pk, Domain::Vote, b"payloae", &sig));
         assert!(!verify(&[0u8; 32], Domain::Vote, b"payload", &sig) || pk == [0u8; 32]);
     }

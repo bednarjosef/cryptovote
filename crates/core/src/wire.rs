@@ -33,6 +33,8 @@ pub struct Inventory {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VoteSummary {
     pub vote_id: String,
+    /// The Issuer whose Registry defines this vote's electorate.
+    pub issuer_key: String,
     pub question: String,
     pub options: Vec<String>,
     pub open_block: u32,
@@ -66,6 +68,7 @@ pub struct InclusionProofJson {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegistrySummary {
+    pub issuer_key: String,
     pub root: String,
     pub epoch: u64,
     pub leaf_count: u64,
@@ -90,12 +93,15 @@ pub struct Tip {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResultJson {
     pub vote_id: String,
+    /// Displayed next to every result: who defined this electorate.
+    pub issuer_key: String,
     pub question: String,
     pub options: Vec<String>,
     pub secrecy: String,
-    /// "result" | "below_minimum" | "not_closed" | "pending" | "unknown"
+    /// "result" | "below_minimum" | "not_closed" | "pending" | "unknown".
+    /// Every counted ballot is anchored in Bitcoin at or before `close_block`;
+    /// there is no weaker mode (A16).
     pub outcome: String,
-    pub guarantee: Option<String>,
     pub counts: Option<Vec<u64>>,
     pub counted: Option<u64>,
     pub missing_shares: Vec<String>,
@@ -104,6 +110,7 @@ pub struct ResultJson {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InitiativeSummary {
     pub initiative_id: String,
+    pub issuer_key: String,
     pub text: String,
     pub threshold_n: u32,
     pub support_deadline_block: u32,
@@ -114,12 +121,16 @@ pub struct InitiativeSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnrollRequest {
-    pub eid: String,
+    /// Identity commitment `C` (hex, canonical `Fr`).
     pub commitment: String,
+    /// Opaque credential for the Issuer's verification backend. The protocol
+    /// never looks inside it; only the backend does.
+    pub credential: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnrollResponse {
+    pub issuer_key: String,
     pub index: u32,
     pub epoch: u64,
     pub root: String,
@@ -129,6 +140,7 @@ pub struct EnrollResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeSummary {
     pub node_key: String,
+    pub issuer_key: String,
     pub mix_key: String,
     pub endpoint: String,
     pub operator: String,

@@ -47,6 +47,7 @@ fn sample_vote(r: &mut impl RngCore) -> VoteDefinition {
     VoteDefinition {
         question: "Should the bridge be built?".into(),
         options: vec!["Yes".into(), "No".into()],
+        issuer_key: rand32(r),
         registry_root: fr_u64(7),
         open_block: 900_000,
         close_block: 901_008,
@@ -82,6 +83,7 @@ fn all_items() -> Vec<Item> {
         }),
         Item::Initiative(Initiative {
             text: "Lower the voting age to 16 — unicode: žluťoučký".into(),
+            issuer_key: rand32(&mut r),
             registry_root: rand_fr(&mut r),
             threshold_n: 120_000,
             support_deadline_block: 905_000,
@@ -161,15 +163,10 @@ fn all_items() -> Vec<Item> {
             operator: "Example Operator".into(),
             country: *b"CZ",
             asn: 6830,
+            issuer_key: rand32(&mut r),
             registry_root: rand_fr(&mut r),
             nullifier: rand_fr(&mut r),
             proof: rand_proof(&mut r),
-        }),
-        Item::Witness(Witness {
-            content_id: rand32(&mut r),
-            vote_id: rand32(&mut r),
-            node_key: rand32(&mut r),
-            signature: [5u8; 64],
         }),
         Item::Share(Share {
             vote_id: rand32(&mut r),
@@ -229,10 +226,6 @@ fn content_id_excludes_proof_and_signature() {
             Item::NodeRegistration(mut v) => {
                 v.proof = rand_proof(&mut r);
                 Item::NodeRegistration(v)
-            }
-            Item::Witness(mut v) => {
-                v.signature = [0xBB; 64];
-                Item::Witness(v)
             }
             other => other,
         };
@@ -405,9 +398,11 @@ fn vector_17_1_tagged_hashes() {
 
 fn vector_vote() -> (VoteDefinition, SigningKey) {
     let sk = SigningKey::from_seed(&[0x42u8; 32]);
+    let issuer = SigningKey::from_seed(&[0x11u8; 32]);
     let mut v = VoteDefinition {
         question: "Should the bridge be built?".into(),
         options: vec!["Yes".into(), "No".into()],
+        issuer_key: issuer.public_key(),
         registry_root: fr_u64(7),
         open_block: 900_000,
         close_block: 901_008,
@@ -434,18 +429,22 @@ fn vector_17_2_vote_definition() {
         hex(&sk.public_key()),
         "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
     );
+    assert_eq!(
+        hex(&v.issuer_key),
+        "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+    );
     let item = Item::VoteDefinition(v.clone());
     let (bytes, content_len) = item.encode_with_content_len();
-    assert_eq!(content_len, 128);
-    assert_eq!(bytes.len(), 192);
+    assert_eq!(content_len, 160);
+    assert_eq!(bytes.len(), 224);
     assert_eq!(
         hex(&bytes[..content_len]),
-        "01011b00000053686f756c642074686520627269646765206265206275696c743f0200000003000000596573020000004e6f0700000000000000000000000000000000000000000000000000000000000000a0bb0d0090bf0d006400000000002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        "01011b00000053686f756c642074686520627269646765206265206275696c743f0200000003000000596573020000004e6fd04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787370700000000000000000000000000000000000000000000000000000000000000a0bb0d0090bf0d006400000000002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
     );
     let vote_id = v.vote_id();
     assert_eq!(
         hex(&vote_id),
-        "1b85ac5e6f3d29dfca5f4a65c04054c7bec252db66ffaffd052e345ce1c1eb09"
+        "70564b260d3247815cfd7111a8fc1e074d965d6d08b7a51cd9dce7360cca5b29"
     );
     let Origin::Authority {
         signature,
@@ -456,14 +455,28 @@ fn vector_17_2_vote_definition() {
     };
     assert_eq!(
         hex(signature),
-        "b2ec980b7597e063a7f65473ad0c9cead988dbc19c5279ae6ce2d75952cc6c662d069bb6df161d2133988b26ca4ad4203ca8c99a91685735e34e7f9dad764306"
+        "94b5f892e8c5efdf1670c61b382b0d44c28b9be1098aaf3ff7d0abd4547c488dbabd55befc5a53d2321c8ed3b7156ef27765f6f7a2111b21b14dfbf6ba1f4f05"
     );
     assert!(verify(authority_key, Domain::Vote, &vote_id, signature));
     assert_eq!(
         hex(&item.item_hash()),
-        "e0fdeb2c92f6d5b889ffc59dff319b7a673ce8fd42f03dba2004102dca69c038"
+        "f5ad47912036b409af3fe10d28d5c065fac78e27015740902d2ea305bdfaf1c3"
     );
     assert_eq!(Item::decode(&bytes).unwrap(), item);
+}
+
+/// `vote_id` covers `issuer_key`: the same question over two Issuers'
+/// registries is two different votes, with independent nullifiers (SPEC §6.1).
+#[test]
+fn vote_id_covers_the_issuer_key() {
+    let (v, _) = vector_vote();
+    let mut other = v.clone();
+    other.issuer_key = SigningKey::from_seed(&[0x22u8; 32]).public_key();
+    assert_ne!(other.vote_id(), v.vote_id());
+    assert_eq!(
+        Item::decode(&Item::VoteDefinition(other.clone()).encode()).unwrap(),
+        Item::VoteDefinition(other)
+    );
 }
 
 #[test]
@@ -479,11 +492,11 @@ fn vector_17_3_ballot_content_id() {
     assert_eq!(n, 71);
     assert_eq!(
         hex(&bytes[..n]),
-        "01041b85ac5e6f3d29dfca5f4a65c04054c7bec252db66ffaffd052e345ce1c1eb0905000000000000000000000000000000000000000000000000000000000000000100000001"
+        "010470564b260d3247815cfd7111a8fc1e074d965d6d08b7a51cd9dce7360cca5b2905000000000000000000000000000000000000000000000000000000000000000100000001"
     );
     assert_eq!(
         hex(&b.content_id()),
-        "b855b6703818caf09bdc43425196236aef1cf4687fc0533ea0d3b7d34eac7aa5"
+        "2cb61f84daf5b8480e1a05f59fb14c5a09339d83682b28a363c8111c9d8d2ca7"
     );
 }
 
@@ -522,35 +535,6 @@ fn vector_17_4_anchor() {
     assert_eq!(
         hex(&cv_core::crypto::merkle::anchor_root(&ids).unwrap()),
         "43aba690ee8b8ffc76eebc2b134cb0df5bfb4f547198a88ab31d16d52a334cf8"
-    );
-}
-
-#[test]
-fn vector_17_5_witness() {
-    let (v, _) = vector_vote();
-    let nk = SigningKey::from_seed(&[0x07u8; 32]);
-    assert_eq!(
-        hex(&nk.public_key()),
-        "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
-    );
-    let ids = vector_ids();
-    let mut payload = ids[0].to_vec();
-    payload.extend_from_slice(&v.vote_id());
-    let w = Witness {
-        content_id: ids[0],
-        vote_id: v.vote_id(),
-        node_key: nk.public_key(),
-        signature: nk.sign(Domain::Witness, &payload),
-    };
-    let bytes = Item::Witness(w.clone()).encode();
-    assert_eq!(bytes.len(), 162);
-    assert_eq!(
-        hex(&bytes),
-        "010810e5cf3d3c8a4f9f3468c8cc58eea84892a22fdadbc1acb22410190044c1d5531b85ac5e6f3d29dfca5f4a65c04054c7bec252db66ffaffd052e345ce1c1eb09ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22cc718229e8a39151dd8168cca00e300b56070ab04ce1c1f028ec766a95360a49c4954025a9572fd16caf6aa2821420bc9005fa907c402ff9f4f3f9c192a5dd101"
-    );
-    assert_eq!(
-        hex(&w.content_id()),
-        "db8b09f07b50ede4d8caf6abd41afefd29c47870f469ba8707de6fdc7763bd64"
     );
 }
 

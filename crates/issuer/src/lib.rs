@@ -1,10 +1,19 @@
-//! Issuer reference implementation (whitepaper §5) with a **mock eID
-//! backend for development**: any eID string is accepted. A real deployment
-//! replaces `MockEid` with the state eID authentication and keeps everything
-//! else.
+//! Issuer reference implementation (whitepaper §5).
 //!
-//! `// TRUST: Issuer for the electorate (whitepaper §2)` — this is the one
-//! privileged actor; it never sees or touches anything but commitments.
+//! An Issuer is any operator of a Registry: it decides who counts as one
+//! eligible person, and signs root snapshots for that electorate. The
+//! protocol does not privilege any of them — items name the `issuer_key`
+//! they rely on and every result displays it (SPEC §4.3, §6.1).
+//!
+//! Everything specific to *how* a person is verified sits behind
+//! [`VerificationBackend`]. The core here is backend-agnostic: it takes a
+//! verdict, keeps `C`, the dedup key and a timestamp, and publishes a new
+//! signed root. Only the mock backend ships in this repository; adapters for
+//! real verification methods belong in separate crates.
+//!
+//! `// TRUST: the Issuer an item names, for that item's electorate
+//! (whitepaper §2)` — the one privileged actor for a vote, and it never sees
+//! or touches anything but commitments.
 #![forbid(unsafe_code)]
 
 pub mod server;
@@ -15,11 +24,14 @@ use cv_core::registry::{RegistrySnapshot, RegistryTree};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, thiserror::Error)]
 pub enum IssuerError {
-    #[error("eID authentication failed")]
-    Auth,
+    #[error("enrollment rejected: {0}")]
+    Rejected(String),
+    #[error("backend verdict unusable: {0}")]
+    Backend(&'static str),
     #[error("commitment is not a canonical field element")]
     Commitment,
     #[error("io: {0}")]
@@ -28,18 +40,76 @@ pub enum IssuerError {
     State(String),
 }
 
-/// Development-only eID backend: accepts any non-empty identifier.
-pub trait EidBackend: Send + Sync {
-    fn authenticate(&self, eid: &str) -> bool;
+/// What an enrollment asks of the Issuer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentRequest<'a> {
+    /// The identity commitment `C` to place in the Registry (SPEC §4.1).
+    pub commitment: Fr,
+    /// Opaque credential material for the backend: a token, a signed
+    /// assertion, a session id — whatever that verification method uses.
+    /// Nothing outside the backend looks inside it.
+    pub credential: &'a str,
 }
 
-pub struct MockEid;
+/// A backend's verdict on one enrollment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verification {
+    /// The person is verified. `dedup_key` is stable for that person across
+    /// enrollments: it is what makes a re-enrollment a *replacement* rather
+    /// than a second leaf, and it is the only thing the Issuer stores about
+    /// who they are.
+    Verified {
+        dedup_key: String,
+    },
+    Rejected {
+        reason: String,
+    },
+}
 
-impl EidBackend for MockEid {
-    fn authenticate(&self, eid: &str) -> bool {
-        // INSECURE: no real identity check. Dev mode only.
-        !eid.is_empty()
+/// The one thing an Issuer needs from an identity-verification method.
+///
+/// How a person is proven real and unique — a national eID, an in-person
+/// check, a document-and-liveness provider, a web of trust — is entirely the
+/// Issuer's business, and is the boundary of Sybil resistance for that
+/// electorate. Adapters live in their own crates; this repository ships only
+/// [`MockBackend`].
+pub trait VerificationBackend: Send + Sync {
+    fn verify(&self, request: &EnrollmentRequest) -> Verification;
+}
+
+/// Development backend: accepts any non-empty credential and uses it as the
+/// dedup key. INSECURE — there is no identity check at all.
+pub struct MockBackend;
+
+impl VerificationBackend for MockBackend {
+    fn verify(&self, request: &EnrollmentRequest) -> Verification {
+        if request.credential.is_empty() {
+            Verification::Rejected {
+                reason: "empty credential".into(),
+            }
+        } else {
+            Verification::Verified {
+                dedup_key: request.credential.to_string(),
+            }
+        }
     }
+}
+
+/// Where an enrollment landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Enrolled {
+    pub index: u32,
+    /// The person already had a leaf; it was overwritten (whitepaper §5).
+    pub replaced: bool,
+}
+
+/// Everything the Issuer keeps about one leaf: who it belongs to (as an
+/// opaque dedup key) and when it was last written. `C` itself is the tree
+/// leaf at the same index.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Record {
+    pub dedup_key: String,
+    pub enrolled_unix: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -47,23 +117,32 @@ struct State {
     key_seed: String,
     epoch: u64,
     leaves: Vec<String>,
-    by_eid: HashMap<String, u32>,
+    records: Vec<Record>,
 }
 
 pub struct Issuer {
     key: SigningKey,
     tree: RegistryTree,
-    by_eid: HashMap<String, u32>,
+    records: Vec<Record>,
+    by_dedup: HashMap<String, u32>,
     epoch: u64,
-    backend: Box<dyn EidBackend>,
+    backend: Box<dyn VerificationBackend>,
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl Issuer {
-    pub fn new(key: SigningKey, backend: Box<dyn EidBackend>) -> Self {
+    pub fn new(key: SigningKey, backend: Box<dyn VerificationBackend>) -> Self {
         Issuer {
             key,
             tree: RegistryTree::new(),
-            by_eid: HashMap::new(),
+            records: Vec::new(),
+            by_dedup: HashMap::new(),
             epoch: 1,
             backend,
         }
@@ -71,11 +150,12 @@ impl Issuer {
 
     pub fn dev(seed: [u8; 32]) -> Self {
         eprintln!(
-            "WARNING: issuer running with the MOCK eID backend — anyone can enroll. Dev mode only."
+            "WARNING: issuer running with the MOCK verification backend — anyone can enroll. Dev mode only."
         );
-        Self::new(SigningKey::from_seed(&seed), Box::new(MockEid))
+        Self::new(SigningKey::from_seed(&seed), Box::new(MockBackend))
     }
 
+    /// This Issuer's identity: the key every item of its electorate names.
     pub fn public_key(&self) -> [u8; 32] {
         self.key.public_key()
     }
@@ -92,21 +172,45 @@ impl Issuer {
         &self.tree
     }
 
-    /// Enroll (or re-enroll: replacement in place, whitepaper §5).
-    /// Returns `(index, replaced)`.
-    pub fn enroll(&mut self, eid: &str, commitment: Fr) -> Result<(u32, bool), IssuerError> {
-        if !self.backend.authenticate(eid) {
-            return Err(IssuerError::Auth);
+    pub fn records(&self) -> &[Record] {
+        &self.records
+    }
+
+    /// Enroll: ask the backend, then insert `C` as a new leaf or replace the
+    /// leaf this person already has (whitepaper §5). Either way the epoch
+    /// advances, so `snapshot()` publishes a new signed root.
+    pub fn enroll(&mut self, request: &EnrollmentRequest) -> Result<Enrolled, IssuerError> {
+        // TRUST: the Issuer decides who is one eligible person (whitepaper §2).
+        let dedup_key = match self.backend.verify(request) {
+            Verification::Verified { dedup_key } => dedup_key,
+            Verification::Rejected { reason } => return Err(IssuerError::Rejected(reason)),
+        };
+        if dedup_key.is_empty() {
+            // Would make every enrollment the same person.
+            return Err(IssuerError::Backend("empty dedup key"));
         }
-        if let Some(&index) = self.by_eid.get(eid) {
-            self.tree.set(index, commitment);
-            self.epoch += 1;
-            return Ok((index, true));
-        }
-        let index = self.tree.push(commitment);
-        self.by_eid.insert(eid.to_string(), index);
+        let now = unix_now();
+        let enrolled = if let Some(&index) = self.by_dedup.get(&dedup_key) {
+            self.tree.set(index, request.commitment);
+            self.records[index as usize].enrolled_unix = now;
+            Enrolled {
+                index,
+                replaced: true,
+            }
+        } else {
+            let index = self.tree.push(request.commitment);
+            self.records.push(Record {
+                dedup_key: dedup_key.clone(),
+                enrolled_unix: now,
+            });
+            self.by_dedup.insert(dedup_key, index);
+            Enrolled {
+                index,
+                replaced: false,
+            }
+        };
         self.epoch += 1;
-        Ok((index, false))
+        Ok(enrolled)
     }
 
     pub fn snapshot(&self) -> RegistrySnapshot {
@@ -127,7 +231,7 @@ impl Issuer {
                 .iter()
                 .map(|l| hex::encode(fr_to_bytes(l)))
                 .collect(),
-            by_eid: self.by_eid.clone(),
+            records: self.records.clone(),
         };
         std::fs::write(
             path,
@@ -136,13 +240,16 @@ impl Issuer {
         Ok(())
     }
 
-    pub fn load(path: &Path, backend: Box<dyn EidBackend>) -> Result<Self, IssuerError> {
+    pub fn load(path: &Path, backend: Box<dyn VerificationBackend>) -> Result<Self, IssuerError> {
         let st: State = serde_json::from_slice(&std::fs::read(path)?)
             .map_err(|e| IssuerError::State(e.to_string()))?;
         let seed: [u8; 32] = hex::decode(&st.key_seed)
             .ok()
             .and_then(|v| v.try_into().ok())
             .ok_or_else(|| IssuerError::State("bad key seed".into()))?;
+        if st.records.len() != st.leaves.len() {
+            return Err(IssuerError::State("records do not match leaves".into()));
+        }
         let mut leaves = Vec::with_capacity(st.leaves.len());
         for l in &st.leaves {
             let b: [u8; 32] = hex::decode(l)
@@ -151,10 +258,17 @@ impl Issuer {
                 .ok_or_else(|| IssuerError::State("bad leaf".into()))?;
             leaves.push(fr_from_canonical(&b).ok_or(IssuerError::Commitment)?);
         }
+        let by_dedup = st
+            .records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.dedup_key.clone(), i as u32))
+            .collect();
         Ok(Issuer {
             key: SigningKey::from_seed(&seed),
             tree: RegistryTree::from_leaves(leaves),
-            by_eid: st.by_eid,
+            records: st.records,
+            by_dedup,
             epoch: st.epoch,
             backend,
         })

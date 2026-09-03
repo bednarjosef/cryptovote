@@ -1,6 +1,8 @@
-//! Phase 5/6: the counting rule over the union of anchors, the fallback,
-//! duplicates, OTS/direct anchor validation, and initiative derivation.
+//! Phase 5/6: the counting rule over the union of anchors, duplicates,
+//! OTS/direct anchor validation, and initiative derivation. Anchors are the
+//! only clock — there is no fallback to fall back to (A16).
 
+use cv_core::DecodeError;
 use cv_core::build::*;
 use cv_core::constants::*;
 use cv_core::context::Deployment;
@@ -85,6 +87,7 @@ fn world(dev_mode: bool) -> World {
         VoteDefinition {
             question: "Tally?".into(),
             options: vec!["A".into(), "B".into(), "C".into()],
+            issuer_key: issuer.public_key(),
             registry_root: tree.root(),
             open_block: 100,
             close_block: 200,
@@ -101,7 +104,7 @@ fn world(dev_mode: bool) -> World {
     )));
     let deployment = Deployment {
         authority_keys: vec![authority.public_key()],
-        issuer_key: issuer.public_key(),
+        issuer_keys: vec![issuer.public_key()],
         dev_mode,
     };
     World {
@@ -130,6 +133,7 @@ fn view(w: &World) -> SnapshotView {
 fn participant(w: &World, i: usize) -> Participant {
     Participant {
         secret: w.secrets[i],
+        issuer_key: w.snapshot.issuer_key,
         registry_root: w.tree.root(),
         index: i as u32,
         siblings: w.tree.path(i as u32).unwrap(),
@@ -158,29 +162,18 @@ fn counting_rule_over_union_of_anchors() {
     for x in &b {
         v.admit(Item::Ballot(x.clone())).unwrap();
     }
-    // Nothing anchored, no witnesses: fallback mode with nothing timely.
-    assert_eq!(
-        tally(&v, &vid),
-        Some(Outcome::BelowMinimum {
-            guarantee: Guarantee::Fallback,
-            counted: 0
-        })
-    );
+    // Nothing anchored yet: nothing is timely, because an anchor is the only
+    // thing that makes a ballot timely (A16).
+    assert_eq!(tally(&v, &vid), Some(Outcome::BelowMinimum { counted: 0 }));
 
     // Anchor 1 (height 150 ≤ close) covers b0..b3; anchor 2 (height 199) covers b3..b5; anchor 3 (height 201 > close) covers b6, b7.
     let ids: Vec<Id> = b.iter().map(|x| x.content_id()).collect();
     v.admit(dev_anchor(&ids[0..4], 150)).unwrap();
     v.admit(dev_anchor(&ids[3..6], 199)).unwrap();
     v.admit(dev_anchor(&ids[6..8], 201)).unwrap();
-    let Some(Outcome::Result {
-        guarantee,
-        counts,
-        counted,
-    }) = tally(&v, &vid)
-    else {
+    let Some(Outcome::Result { counts, counted }) = tally(&v, &vid) else {
         panic!()
     };
-    assert_eq!(guarantee, Guarantee::Anchored);
     assert_eq!(
         counted, 6,
         "b0..b5 under some anchor ≤ close; b6, b7 only after close"
@@ -228,16 +221,16 @@ fn counting_rule_over_union_of_anchors() {
     v2.admit(dev_anchor(&[bb.content_id()], 150)).unwrap();
     assert_eq!(
         tally(&v2, &w2.vote.vote_id()),
-        Some(Outcome::BelowMinimum {
-            guarantee: Guarantee::Anchored,
-            counted: 1
-        })
+        Some(Outcome::BelowMinimum { counted: 1 })
     );
     assert_eq!(tally(&v2, &[9; 32]), None);
 }
 
+/// There is no way to be counted other than being anchored in Bitcoin. The
+/// §9 witness fallback is gone: a node's signature was never a clock, and
+/// seven of them were seven signatures, not seven people (A16).
 #[test]
-fn fallback_witnesses_when_no_anchor_exists() {
+fn without_an_anchor_nothing_counts() {
     let w = world(true);
     let mut v = view(&w);
     let vid = w.vote.vote_id();
@@ -245,15 +238,15 @@ fn fallback_witnesses_when_no_anchor_exists() {
     let b2 = ballot(&w, 2, 1);
     v.admit(Item::Ballot(b1.clone())).unwrap();
     v.admit(Item::Ballot(b2.clone())).unwrap();
-    // W registered nodes witness b1; only W-1 witness b2.
-    let node_keys: Vec<SigningKey> = (0..WITNESS_THRESHOLD_W)
-        .map(|i| SigningKey::from_seed(&[0x30 + i as u8; 32]))
-        .collect();
-    for (i, k) in node_keys.iter().enumerate() {
+
+    // Registered nodes exist and the Log is healthy; the vote is simply not
+    // anchored, so it has no result to give.
+    for i in 0..3usize {
+        let node = SigningKey::from_seed(&[0x30 + i as u8; 32]);
         let reg = build_node_registration(
             dev_keys(),
             &participant(&w, 10 + i),
-            k.public_key(),
+            node.public_key(),
             [0; 32],
             "x:1".into(),
             "o".into(),
@@ -262,66 +255,27 @@ fn fallback_witnesses_when_no_anchor_exists() {
         )
         .unwrap();
         v.admit(Item::NodeRegistration(reg)).unwrap();
-        v.admit(Item::Witness(build_witness(k, b1.content_id(), vid)))
-            .unwrap();
-        if i + 1 < WITNESS_THRESHOLD_W {
-            v.admit(Item::Witness(build_witness(k, b2.content_id(), vid)))
-                .unwrap();
-        }
     }
-    // A retransmitted witness by the same node is accepted but does not count twice.
-    v.admit(Item::Witness(build_witness(
-        &node_keys[0],
-        b2.content_id(),
-        vid,
-    )))
-    .unwrap();
     assert_eq!(
         tally(&v, &vid),
-        Some(Outcome::BelowMinimum {
-            guarantee: Guarantee::Fallback,
-            counted: 1
-        }),
-        "b1 has W witnesses, b2 has W-1; min_ballots is 2"
+        Some(Outcome::BelowMinimum { counted: 0 }),
+        "no anchor, no count — whatever any node says"
     );
-    // A witness from an unregistered key is invalid; a node whose person
-    // double-registered no longer counts.
-    let stranger = SigningKey::from_seed(&[0x99u8; 32]);
-    assert!(matches!(
-        v.admit(Item::Witness(build_witness(
-            &stranger,
-            b2.content_id(),
-            vid
-        ))),
-        Err(Invalid::MissingReference(_))
-    ));
-    let other_key = SigningKey::from_seed(&[0x77u8; 32]);
-    let dup_reg = build_node_registration(
-        dev_keys(),
-        &participant(&w, 10),
-        other_key.public_key(),
-        [0; 32],
-        "y:1".into(),
-        "o".into(),
-        *b"CZ",
-        1,
-    )
-    .unwrap();
-    v.admit(Item::NodeRegistration(dup_reg)).unwrap();
+    // The 0x08 item type that used to carry those attestations no longer
+    // decodes at all.
+    let mut bytes = Item::Ballot(b1.clone()).encode();
+    bytes[1] = 0x08;
+    assert_eq!(Item::decode(&bytes), Err(DecodeError::ItemType(0x08)));
+
+    // One anchor from anyone — no permission, no registration — and both
+    // ballots count.
+    v.admit(dev_anchor(&[b1.content_id(), b2.content_id()], 150))
+        .unwrap();
     assert_eq!(
         tally(&v, &vid),
-        Some(Outcome::BelowMinimum {
-            guarantee: Guarantee::Fallback,
-            counted: 0
-        })
-    );
-    // As soon as any anchor ≤ close exists, the fallback is off.
-    v.admit(dev_anchor(&[b2.content_id()], 150)).unwrap();
-    assert_eq!(
-        tally(&v, &vid),
-        Some(Outcome::BelowMinimum {
-            guarantee: Guarantee::Anchored,
-            counted: 1
+        Some(Outcome::Result {
+            counts: vec![1, 1, 0],
+            counted: 2
         })
     );
 }

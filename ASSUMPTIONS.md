@@ -35,6 +35,89 @@ person never has two leaves in one snapshot (whitepaper §5). The snapshot is
 leaf list; `registry_size(root) = leaf_count` is what the 1 % initiative
 threshold is computed from.
 
+**A47 — Several Issuers, named by each item.** Whitepaper v0.4 §5 makes the
+Issuer a *role*, not a singleton: any operator of a registry is one, and the
+protocol privileges none of them. Resolution: `VoteDefinition`, `Initiative`
+and `NodeRegistration` each carry an `issuer_key` (Ed25519, immediately before
+`registry_root`), and a `registry_root` is usable by an item only if a
+snapshot with that root carries a valid signature by *that* key — snapshots
+are indexed by `(issuer_key, root)`, since two Issuers may publish the same
+root. `vote_id` covers `issuer_key`, so the same question over two registries
+is two votes. There is no global list of blessed Issuers in the validity
+rules: nodes and verifiers may be told which registries to *store*
+(`--issuer-key`, repeatable, empty = any), which decides what a node serves,
+never what is valid. The consequence is deliberate: anyone can stand up an
+Issuer with a one-leaf registry, so a result is meaningless without knowing
+whose electorate it is over — which is why the verifier and the client print
+the Issuer next to every result.
+
+Nullifier scoping is unchanged and is what makes several registries safe: a
+ballot, support or key-party nullifier is `poseidon(s, tag, id)` with `id` the
+vote or initiative, so a person enrolled by three Issuers still has exactly
+one nullifier per vote. The two `id = 0` nullifiers stay global on purpose.
+A node registration is one per person across the whole network, whichever
+Issuer enrolled them (registering twice under two Issuers is self-defeating
+under A10, which is the intended reading of "one node per person"), and the
+author pseudonym links a person's initiatives across registries exactly as it
+already links them within one (A9). Scoping either of them by Issuer would
+mean changing the circuit's public `id` input for no gain.
+
+**A48 — One interface for identity verification.** How an Issuer decides that
+a person is real and unique is that Issuer's business and the boundary of
+Sybil resistance for its electorate (whitepaper §5), so `cv-issuer` exposes
+exactly one thing: `VerificationBackend::verify(request) ->
+Verified { dedup_key } | Rejected { reason }`. The request is the commitment
+`C` plus an opaque `credential` string that only the backend interprets. The
+core is backend-agnostic: on `Verified` it inserts `C` as a new leaf, or
+overwrites the leaf of the person that `dedup_key` already names, then
+publishes a new signed root. It stores only `C`, the dedup key and a
+timestamp — never a name, a document, or anything the backend saw. An empty
+dedup key is refused, since it would make every enrollment the same person.
+Only the mock backend (dev mode: accepts any non-empty credential and uses it
+as the dedup key) ships here; adapters for real verification methods belong
+in their own crates, and no specific provider is named anywhere in this
+repository.
+
+**A49 — Superseded by A16.** Scoping fallback witnesses to the vote's own
+electorate was the right repair for the Sybil hole multiple Issuers opened in
+whitepaper §9, and it held for a day. Then the mechanism itself went: see A16
+for why a node's signature is not a clock at any scope.
+
+**A50 — Everything is scoped to an electorate; nothing is global.** With one
+Issuer it did not matter that the node-registration nullifier and the author
+pseudonym used `id = 0`: one registry, one meaning. With several (A47) a
+global `id = 0` was wrong twice over. It linked a person's node and
+pseudonym across every registry they belong to, for no benefit. And it forced
+a choice: someone enrolled with two Issuers could hold **one** node
+registration in total, so registering under one electorate silently disabled
+them in the other — and a second registration would collide with their own
+first one and, under the duplicate rule (A10), destroy both. Resolution: both
+use `id = fr_mod(issuer_key)`. One node per person per electorate, one
+pseudonym per person per electorate, no cross-electorate linkage. The circuit
+is unchanged: `id` is a public input it never interprets.
+
+With the witness fallback gone (A16), the remaining use of a node
+registration is mix-hop selection, and per-electorate is the right
+granularity for that too: the diversity a client wants is diversity among the
+people of the electorate it is voting in.
+
+**A51 — Baseline network assumption: no node has any power.** Everything from
+here on assumes the network has enough registered hops for a three-hop path,
+and at least one honest node reachable by the voter that anchors (or relays to
+someone who does). There is no majority, quorum or committee anywhere: with
+the witness fallback removed (A16), nothing a node signs affects a result, so
+the count does not depend on how many nodes are honest — only on whether the
+voter's ballot reached **one** of them before `close_block`, which the voter
+can check for themselves (Phase 11b). Nodes may all anchor, including
+dishonest ones: an anchor is verified against Bitcoin, so a dishonest
+anchorer can only help (by anchoring) or abstain (by not), never harm.
+
+Below the baseline, privacy degrades (the client reports how far it got and
+falls back to direct submission) and liveness can fail (a ballot that reaches
+no honest node is not counted, and the voter sees that it was not). Neither
+can produce a wrong result: an eclipsed voter is a missing ballot, never a
+forged one.
+
 **A24 — Groth16 trusted setup.** The whitepaper allows Groth16. Its
 circuit-specific setup is a trust assumption the whitepaper does not list.
 Dev mode generates the parameters from a fixed seed (insecure, labelled).
@@ -126,12 +209,38 @@ Anchorers are expected to anchor only items not covered by their previous
 anchors ("delta anchoring"); the counting rule is a union over anchors so this
 is equivalent to §9 and keeps items small. Leaves may be ids of any item type.
 
-**A16 — Witness item.** §9's fallback ("signed as seen-before-close by ≥ W
-registered nodes") needs the signatures on the Log for the verifier to see
-them, so item type `Witness` exists. It is the §9 mechanism, not a new
-feature. Fallback applies to a vote iff no valid anchor at height ≤
-`close_block` covers any of its ballots (and no such anchor exists at all);
-results are then labelled `FALLBACK`.
+**A16 — The §9 witness fallback is removed; anchors are the only clock.**
+Whitepaper §9 allows a degraded mode: if a vote has no anchor, `W = 7`
+registered nodes may sign "I held this ballot before close" and the result is
+published labelled `FALLBACK`. This was implemented (item type `0x08`) and
+then deleted, for three reasons.
+
+A signature is not a clock. `W` signatures are `W` keys, and keys are cheap;
+what was supposed to make them expensive is that each belongs to a registered
+person. With several Issuers (A47) that stopped being true — anyone can stand
+up an Issuer, enrol seven of themselves and mint the quorum — and scoping the
+witnesses to the vote's own electorate (the earlier fix) only narrowed the
+attack to that electorate's own node operators, who are exactly the people
+with the most to gain from backdating. It also made the protocol's guarantee
+conditional: every consumer of a result had to understand two levels and
+decide what a `FALLBACK` one was worth.
+
+Anchors need none of that. Anchoring is permissionless and unpriced (an
+OpenTimestamps calendar aggregates thousands of roots into one transaction),
+an anchor covers everyone's items regardless of who made it, and it is
+verified against Bitcoin rather than believed — so a dishonest node's anchor
+is exactly as good as an honest one's, and the worst any node can do is not
+anchor. One node anchoring serves the entire network. The failure mode the
+fallback existed for — nobody anchored for a whole voting period — now yields
+no result instead of a weakly-attested one, which is the right answer and one
+that any single volunteer prevents.
+
+Consequences: item type `0x08` is retired (decoding it is an error), the
+`Guarantee` level and the `guarantee` field are gone, `WITNESS_THRESHOLD_W`
+and the `Witness` signature domain are gone, and node identity has no role in
+counting at all. What a node is for is storing, validating, relaying,
+anchoring, and optionally being a mix hop — none of which needs anyone's
+permission, and none of which is trusted (A51).
 
 **A31 — Direct anchors** put `"CVOT" || root` in an `OP_RETURN` output and
 prove inclusion with a standard partial Merkle tree.

@@ -6,6 +6,10 @@ use cv_crypto::field::Fr;
 use cv_crypto::groth16::{MembershipKeys, MembershipVerifier};
 use std::collections::HashMap;
 
+/// Identity of a Registry: which Issuer signed it, and the root it fixes.
+/// Two Issuers may publish the same root; they are still different electorates.
+pub type RegistryId = ([u8; 32], Fr);
+
 /// A known Registry snapshot (only what validation needs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegistryInfo {
@@ -17,11 +21,21 @@ pub struct RegistryInfo {
 pub struct Deployment {
     /// `// TRUST: authority keys for *creating* votes only (whitepaper §7)`.
     pub authority_keys: Vec<[u8; 32]>,
-    /// `// TRUST: Issuer for the electorate (whitepaper §2)`.
-    pub issuer_key: [u8; 32],
+    /// Issuers whose Registry snapshots this node or verifier stores. Empty
+    /// means "any Issuer". Storage policy only, never a validity rule: an
+    /// item is valid against the Registry of the Issuer *it names*, and every
+    /// result displays that Issuer (SPEC §4.3).
+    pub issuer_keys: Vec<[u8; 32]>,
     /// One flag for every insecure shortcut (SPEC §14). Binaries print a
     /// warning at startup when it is set.
     pub dev_mode: bool,
+}
+
+impl Deployment {
+    /// Whether this deployment stores Registry snapshots of `issuer_key`.
+    pub fn accepts_issuer(&self, issuer_key: &[u8; 32]) -> bool {
+        self.issuer_keys.is_empty() || self.issuer_keys.contains(issuer_key)
+    }
 }
 
 /// Lookup interface used by the validity rules. Implemented by the Log
@@ -30,7 +44,8 @@ pub struct Deployment {
 pub trait Context {
     fn deployment(&self) -> &Deployment;
     fn membership_verifier(&self) -> &MembershipVerifier;
-    fn registry(&self, root: &Fr) -> Option<RegistryInfo>;
+    /// The Registry of `issuer_key` with this `root`, if known.
+    fn registry(&self, issuer_key: &[u8; 32], root: &Fr) -> Option<RegistryInfo>;
     fn vote(&self, id: &Id) -> Option<VoteDefinition>;
     fn initiative(&self, id: &Id) -> Option<Initiative>;
     fn keyparty(&self, id: &Id) -> Option<KeyParty>;
@@ -51,7 +66,7 @@ pub trait Context {
 pub struct MemoryContext {
     pub deployment: Deployment,
     pub keys: &'static MembershipKeys,
-    pub registries: HashMap<Fr, RegistryInfo>,
+    pub registries: HashMap<RegistryId, RegistryInfo>,
     pub votes: HashMap<Id, VoteDefinition>,
     pub initiatives: HashMap<Id, Initiative>,
     pub keyparties: HashMap<Id, KeyParty>,
@@ -75,8 +90,9 @@ impl MemoryContext {
         }
     }
 
-    pub fn add_registry(&mut self, root: Fr, leaf_count: u64) {
-        self.registries.insert(root, RegistryInfo { leaf_count });
+    pub fn add_registry(&mut self, issuer_key: [u8; 32], root: Fr, leaf_count: u64) {
+        self.registries
+            .insert((issuer_key, root), RegistryInfo { leaf_count });
     }
 
     pub fn add_vote(&mut self, v: VoteDefinition) -> Id {
@@ -99,8 +115,8 @@ impl Context for MemoryContext {
     fn membership_verifier(&self) -> &MembershipVerifier {
         &self.keys.verifier
     }
-    fn registry(&self, root: &Fr) -> Option<RegistryInfo> {
-        self.registries.get(root).copied()
+    fn registry(&self, issuer_key: &[u8; 32], root: &Fr) -> Option<RegistryInfo> {
+        self.registries.get(&(*issuer_key, *root)).copied()
     }
     fn vote(&self, id: &Id) -> Option<VoteDefinition> {
         self.votes.get(id).cloned()

@@ -66,21 +66,23 @@ pub fn device_create(path: String) -> Result<String, FfiError> {
     )))
 }
 
-/// Enroll with an issuer; returns the leaf index.
+/// Enroll with an Issuer; returns the leaf index. `credential` is whatever
+/// that Issuer's verification backend expects.
 #[uniffi::export]
 pub fn device_enroll(
     path: String,
     issuer_url: String,
-    eid: String,
+    credential: String,
     node_url: String,
     dev: bool,
 ) -> Result<u32, FfiError> {
     let rt = runtime()?;
     rt.block_on(async {
         let mut d = Device::load(Path::new(&path))?;
-        let pc = ParticipantClient::new(NodeClient::new(node_url), keys(dev, None)?);
+        let mut pc = ParticipantClient::new(NodeClient::new(node_url), keys(dev, None)?);
+        pc.dev = dev;
         let r = pc
-            .enroll(&mut d, &issuer_url, &eid)
+            .enroll(&mut d, &issuer_url, &credential)
             .await
             .map_err(|e| FfiError::Failure { msg: e.to_string() })?;
         d.save(Path::new(&path))?;
@@ -123,7 +125,10 @@ pub fn cast_ballot(
             let _ = tor_timeout_secs;
             TorSetup::Disabled
         };
-        let mc = MixClient::new(NodeClient::new(node_url), tor);
+        let mc = MixClient {
+            dev,
+            ..MixClient::new(NodeClient::new(node_url), tor)
+        };
         let k = keys(dev, None)?;
         let r = mc
             .cast_with_retry(

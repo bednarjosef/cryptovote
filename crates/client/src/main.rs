@@ -27,6 +27,11 @@ struct Args {
     /// Release: directory with `membership.pk`.
     #[arg(long)]
     keys_dir: Option<PathBuf>,
+    /// Bitcoin headers (SPEC §15 file) used to check that an anchor covering
+    /// your ballot is really in Bitcoin. Without it, a confirmation only
+    /// proves your ballot is in the anchor's Merkle root.
+    #[arg(long)]
+    headers: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -35,16 +40,22 @@ struct Args {
 enum Command {
     /// Create a new device secret.
     Init,
-    /// Enroll with an issuer.
+    /// Enroll with an Issuer (`--issuer` is its base URL).
     Enroll {
         #[arg(long)]
         issuer: String,
+        /// Credential for that Issuer's verification backend (any non-empty
+        /// string under the dev mock backend).
         #[arg(long)]
-        eid: String,
+        credential: String,
     },
+    /// List the registries (Issuers) the node carries.
+    Registries,
     /// List votes on the node.
     Votes,
-    /// Cast a ballot and wait until it is anchored.
+    /// Cast a ballot and wait until it is anchored. Goes through the mix by
+    /// default (three hops, two paths), falling back to direct submission if
+    /// no hops are available — the privacy actually achieved is printed.
     Vote {
         #[arg(long)]
         vote: String,
@@ -52,6 +63,10 @@ enum Command {
         option: u8,
         #[arg(long, default_value_t = 120)]
         wait_secs: u64,
+        /// Submit straight to the node instead of through the mix. Faster,
+        /// and it shows that node your IP next to your ballot.
+        #[arg(long)]
+        no_mix: bool,
     },
     /// Show the status of this device's ballot in a vote.
     Status {
@@ -67,10 +82,40 @@ enum Command {
     Initiative {
         #[arg(long)]
         text: String,
+        /// Issuer whose registry defines the electorate (hex key). Defaults
+        /// to the node's newest registry.
+        #[arg(long)]
+        issuer: Option<String>,
         #[arg(long)]
         deadline_block: u32,
         #[arg(long, default_value = "none")]
         secrecy: String,
+    },
+    /// Publish a registration for a node you run, so other people's clients
+    /// can pick it as a mix hop. Anyone enrolled with any Issuer can do this;
+    /// the Issuer is not asked and does not learn of it. One per person per
+    /// electorate.
+    RegisterNode {
+        /// The node's Ed25519 key, printed by `cv-node` at startup.
+        #[arg(long)]
+        node_key: String,
+        /// The node's X25519 mix key, printed by `cv-node` at startup.
+        #[arg(long)]
+        mix_key: String,
+        /// "host:port" or "xxx.onion:port" clients can reach it on.
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long, default_value = "unnamed")]
+        operator: String,
+        /// ISO 3166-1 alpha-2, self-declared; used only for hop diversity.
+        #[arg(long, default_value = "ZZ")]
+        country: String,
+        #[arg(long, default_value_t = 0)]
+        asn: u32,
+        /// Which electorate to register in (hex issuer key). Defaults to the
+        /// node's newest registry.
+        #[arg(long)]
+        issuer: Option<String>,
     },
     /// List initiatives.
     Initiatives,
@@ -116,24 +161,49 @@ async fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("bad proving key"))?;
         Arc::new(groth16::MembershipKeys::from_proving_key(pk))
     };
+    let headers: Option<Arc<dyn cv_core::snapshot::Headers>> = match &args.headers {
+        Some(p) => Some(Arc::new(cv_client::evidence::FileHeaders(
+            cv_core::headers::HeaderChain::from_file(&std::fs::read(p)?, 0)?,
+        ))),
+        None => {
+            if !args.dev {
+                eprintln!(
+                    "note: no --headers, so a confirmation proves inclusion in an anchor's \
+                     Merkle root but not that the root is in Bitcoin"
+                );
+            }
+            None
+        }
+    };
     let mut device = Device::load(&args.device)?;
-    let pc = ParticipantClient::new(NodeClient::new(args.node.clone()), keys);
+    let mut pc = ParticipantClient::new(NodeClient::new(args.node.clone()), keys);
+    pc.dev = args.dev;
+    pc.headers = headers;
     match args.command {
         Command::Init => unreachable!(),
-        Command::Enroll { issuer, eid } => {
-            let r = pc.enroll(&mut device, &issuer, &eid).await?;
+        Command::Enroll { issuer, credential } => {
+            let r = pc.enroll(&mut device, &issuer, &credential).await?;
             device.save(&args.device)?;
             println!(
-                "enrolled: index {} epoch {} root {} replaced {}",
-                r.index, r.epoch, r.root, r.replaced
+                "enrolled with issuer {}: index {} epoch {} root {} replaced {}",
+                r.issuer_key, r.index, r.epoch, r.root, r.replaced
             );
+        }
+        Command::Registries => {
+            for r in pc.node.registries().await? {
+                println!(
+                    "issuer {} root {} epoch {} leaves {}",
+                    r.issuer_key, r.root, r.epoch, r.leaf_count
+                );
+            }
         }
         Command::Votes => {
             for v in pc.node.votes().await? {
                 println!(
-                    "{} [{}] {} options={:?} open={} close={} ballots={}",
+                    "{} [{}] issuer={} {} options={:?} open={} close={} ballots={}",
                     v.vote_id,
                     v.secrecy,
+                    v.issuer_key,
                     v.question,
                     v.options,
                     v.open_block,
@@ -146,20 +216,60 @@ async fn main() -> anyhow::Result<()> {
             vote,
             option,
             wait_secs,
+            no_mix,
         } => {
             let vid = id(&vote)?;
-            let (ballot, resp) = pc.cast(&device, &vid, option).await?;
-            println!("submitted: {resp:?}");
+            let ballot = if no_mix {
+                let (ballot, resp) = pc.cast(&device, &vid, option).await?;
+                println!("submitted directly: {resp:?}");
+                ballot
+            } else {
+                // Through the mix, which retries on fresh paths until the
+                // anchor checks out (or the window runs out).
+                let mc = cv_client::mix::MixClient {
+                    dev: args.dev,
+                    headers: pc.headers.clone(),
+                    ..cv_client::mix::MixClient::new(
+                        NodeClient::new(args.node.clone()),
+                        cv_client::mix::TorSetup::Disabled,
+                    )
+                };
+                let report = mc
+                    .cast_with_retry(
+                        &mut device,
+                        &pc.keys,
+                        &vid,
+                        option,
+                        Duration::from_secs(wait_secs),
+                        3,
+                    )
+                    .await?;
+                device.save(&args.device)?;
+                println!(
+                    "submitted through the mix: {} (attempt {})",
+                    report.privacy, report.attempts
+                );
+                report.ballot
+            };
             println!("nullifier: {}", hex::encode(fr_to_bytes(&ballot.nullifier)));
             println!("receipt:   {}", ParticipantClient::receipt(&ballot));
             match pc
-                .confirm(&vid, &ballot.nullifier, Duration::from_secs(wait_secs))
+                .confirm_evidence(&ballot, Duration::from_secs(wait_secs))
                 .await?
             {
-                Some(h) => println!("anchored at height {h}"),
-                None => {
-                    println!("not anchored within {wait_secs}s (keep the device on; it will retry)")
+                Some(e) => {
+                    // Checked here, not taken from the node.
+                    println!(
+                        "anchored at height {} in anchor {} ({:?})",
+                        e.height,
+                        hex::encode(e.anchor_id),
+                        e.check
+                    );
                 }
+                None => println!(
+                    "no checkable anchor within {wait_secs}s — your ballot is not in yet; \
+                     keep the device on, it will resend (identical bytes, so resending is safe)"
+                ),
             }
         }
         Command::Status { vote } => {
@@ -185,12 +295,17 @@ async fn main() -> anyhow::Result<()> {
         Command::Result { vote } => {
             let vid = id(&vote)?;
             match pc.result(&vid).await? {
-                Some(r) => println!("{}", serde_json::to_string_pretty(&r)?),
+                Some(r) => {
+                    // Whose electorate this result is over (whitepaper §5).
+                    println!("issuer: {}", r.issuer_key);
+                    println!("{}", serde_json::to_string_pretty(&r)?);
+                }
                 None => println!("unknown vote"),
             }
         }
         Command::Initiative {
             text,
+            issuer,
             deadline_block,
             secrecy,
         } => {
@@ -202,20 +317,66 @@ async fn main() -> anyhow::Result<()> {
             let regs = pc.node.registries().await?;
             let latest = regs
                 .iter()
+                .filter(|r| issuer.as_ref().is_none_or(|k| &r.issuer_key == k))
                 .max_by_key(|r| r.epoch)
-                .ok_or_else(|| anyhow::anyhow!("node has no registry"))?;
+                .ok_or_else(|| anyhow::anyhow!("node has no registry for that issuer"))?;
+            let issuer_key = id(&latest.issuer_key)?;
             let root =
                 fr_from_canonical(&id(&latest.root)?).ok_or_else(|| anyhow::anyhow!("bad root"))?;
             let (i, resp) = pc
-                .create_initiative(&device, &root, text, deadline_block, secrecy)
+                .create_initiative(&device, &issuer_key, &root, text, deadline_block, secrecy)
                 .await?;
-            println!("initiative {}: {resp:?}", hex::encode(i.content_id()));
+            println!(
+                "initiative {} (issuer {}): {resp:?}",
+                hex::encode(i.content_id()),
+                latest.issuer_key
+            );
+        }
+        Command::RegisterNode {
+            node_key,
+            mix_key,
+            endpoint,
+            operator,
+            country,
+            asn,
+            issuer,
+        } => {
+            let regs = pc.node.registries().await?;
+            let latest = regs
+                .iter()
+                .filter(|r| issuer.as_ref().is_none_or(|k| &r.issuer_key == k))
+                .max_by_key(|r| r.epoch)
+                .ok_or_else(|| anyhow::anyhow!("node has no registry for that issuer"))?;
+            let country: [u8; 2] = country
+                .as_bytes()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("country must be two letters"))?;
+            let (reg, resp) = pc
+                .register_node(
+                    &device,
+                    &id(&latest.issuer_key)?,
+                    &fr_from_canonical(&id(&latest.root)?)
+                        .ok_or_else(|| anyhow::anyhow!("bad root"))?,
+                    id(&node_key)?,
+                    id(&mix_key)?,
+                    endpoint,
+                    operator,
+                    country,
+                    asn,
+                )
+                .await?;
+            println!(
+                "registered node {} in issuer {}'s electorate: {resp:?}",
+                hex::encode(reg.content_id()),
+                latest.issuer_key
+            );
         }
         Command::Initiatives => {
             for i in pc.initiatives().await? {
                 println!(
-                    "{} supports={}/{} deadline={} derived_vote={:?} {}",
+                    "{} issuer={} supports={}/{} deadline={} derived_vote={:?} {}",
                     i.initiative_id,
+                    i.issuer_key,
                     i.supports,
                     i.threshold_n,
                     i.support_deadline_block,

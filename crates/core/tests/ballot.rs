@@ -19,6 +19,7 @@ struct World {
     tree: RegistryTree,
     secrets: Vec<Fr>,
     authority: SigningKey,
+    issuer_key: [u8; 32],
     vote: VoteDefinition,
     vote_id: Id,
 }
@@ -28,18 +29,20 @@ fn world() -> World {
     let tree = RegistryTree::from_leaves(secrets.iter().map(commitment).collect());
     let authority = SigningKey::from_seed(&[0x42u8; 32]);
     let issuer = SigningKey::from_seed(&[0x11u8; 32]);
+    let issuer_key = issuer.public_key();
     let deployment = Deployment {
         authority_keys: vec![authority.public_key()],
-        issuer_key: issuer.public_key(),
+        issuer_keys: vec![issuer_key],
         dev_mode: true,
     };
     let mut ctx = MemoryContext::new(deployment, dev_keys());
-    ctx.add_registry(tree.root(), tree.leaf_count());
+    ctx.add_registry(issuer_key, tree.root(), tree.leaf_count());
     let vote = sign_vote_definition(
         &authority,
         VoteDefinition {
             question: "Build the bridge?".into(),
             options: vec!["Yes".into(), "No".into(), "Abstain".into()],
+            issuer_key,
             registry_root: tree.root(),
             open_block: 100,
             close_block: 200,
@@ -56,6 +59,7 @@ fn world() -> World {
         tree,
         secrets,
         authority,
+        issuer_key,
         vote,
         vote_id,
     }
@@ -64,6 +68,7 @@ fn world() -> World {
 fn participant(w: &World, i: usize) -> Participant {
     Participant {
         secret: w.secrets[i],
+        issuer_key: w.issuer_key,
         registry_root: w.tree.root(),
         index: i as u32,
         siblings: w.tree.path(i as u32).unwrap(),
@@ -115,7 +120,7 @@ fn vote_definition_validity() {
     v.registry_root = Fr::from(99u64);
     assert!(matches!(
         validate_vote(&sign_vote_definition(&w.authority, v), &w.ctx),
-        Err(Invalid::MissingReference(Reference::Registry(_)))
+        Err(Invalid::MissingReference(Reference::Registry(..)))
     ));
     // Initiative origin without a derivable vote → orphan.
     let mut v = w.vote.clone();
@@ -218,6 +223,123 @@ fn ballots_are_deterministic_and_validated() {
     assert_eq!(w.vote_id, w.vote.vote_id());
 }
 
+/// Several Issuers coexist (SPEC §4.3, §6.1): an item's `registry_root` only
+/// counts under the Issuer that item names, `vote_id` covers `issuer_key`,
+/// and one person may legitimately hold a leaf in more than one registry.
+#[test]
+fn several_issuers_coexist() {
+    let mut w = world();
+    let issuer_b = SigningKey::from_seed(&[0x12u8; 32]).public_key();
+    // A smaller electorate made of some of the same people.
+    let tree_b = RegistryTree::from_leaves(w.secrets[..8].iter().map(commitment).collect());
+    w.ctx.deployment.issuer_keys.push(issuer_b);
+    w.ctx
+        .add_registry(issuer_b, tree_b.root(), tree_b.leaf_count());
+
+    // Issuer A's root is not Issuer B's root: naming B with A's root refers to
+    // a registry that does not exist, rather than borrowing A's electorate.
+    let mut v = w.vote.clone();
+    v.issuer_key = issuer_b;
+    assert!(matches!(
+        validate_vote(&sign_vote_definition(&w.authority, v), &w.ctx),
+        Err(Invalid::MissingReference(Reference::Registry(..)))
+    ));
+
+    // B's own vote: valid, and a different vote_id although question,
+    // options and blocks are identical.
+    let vote_b = sign_vote_definition(
+        &w.authority,
+        VoteDefinition {
+            issuer_key: issuer_b,
+            registry_root: tree_b.root(),
+            ..w.vote.clone()
+        },
+    );
+    assert_eq!(validate_vote(&vote_b, &w.ctx), Ok(()));
+    assert_ne!(vote_b.vote_id(), w.vote_id);
+    w.ctx.add_vote(vote_b.clone());
+
+    // The same person votes in both electorates. Nullifiers are scoped per
+    // vote, so the two ballots are independent and unlinkable.
+    let p_a = participant(&w, 5);
+    let p_b = Participant {
+        secret: w.secrets[5],
+        issuer_key: issuer_b,
+        registry_root: tree_b.root(),
+        index: 5,
+        siblings: tree_b.path(5).unwrap(),
+    };
+    let ballot_a = plaintext_ballot(dev_keys(), &p_a, &w.vote, 1).unwrap();
+    let ballot_b = plaintext_ballot(dev_keys(), &p_b, &vote_b, 1).unwrap();
+    assert_ne!(ballot_a.nullifier, ballot_b.nullifier);
+    assert_eq!(validate_ballot(&ballot_a, &w.ctx), Ok(()));
+    assert_eq!(validate_ballot(&ballot_b, &w.ctx), Ok(()));
+    // A ballot proven against B's registry is not valid for A's vote.
+    let cross = Ballot {
+        vote_id: w.vote_id,
+        ..ballot_b.clone()
+    };
+    assert_eq!(validate_ballot(&cross, &w.ctx), Err(Invalid::BadProof));
+
+    // Node registrations are scoped to the electorate too: one node per person
+    // per Issuer, so someone enrolled with both can serve both networks
+    // without the duplicate rule cancelling either, and the two registrations
+    // do not link back to one person (A50).
+    let node_sk = SigningKey::from_seed(&[0x56u8; 32]);
+    let node = |p: &Participant| {
+        build_node_registration(
+            dev_keys(),
+            p,
+            node_sk.public_key(),
+            [0x66; 32],
+            "node.example:8443".into(),
+            "Example".into(),
+            *b"CZ",
+            6830,
+        )
+        .unwrap()
+    };
+    let reg_a = node(&p_a);
+    let reg_b = node(&p_b);
+    assert_ne!(reg_a.nullifier, reg_b.nullifier);
+    assert_eq!(validate_node_registration(&reg_a, &w.ctx), Ok(()));
+    assert_eq!(validate_node_registration(&reg_b, &w.ctx), Ok(()));
+
+    // Within one electorate it is still one per person: a second, differing
+    // registration under the same Issuer shares the nullifier and the
+    // duplicate rule (SPEC §7.1) drops both.
+    let twice = build_node_registration(
+        dev_keys(),
+        &p_a,
+        SigningKey::from_seed(&[0x57u8; 32]).public_key(),
+        [0x66; 32],
+        "other.example:8443".into(),
+        "Example".into(),
+        *b"CZ",
+        6830,
+    )
+    .unwrap();
+    assert_eq!(twice.nullifier, reg_a.nullifier);
+    assert_ne!(twice.content_id(), reg_a.content_id());
+
+    // The author pseudonym is scoped the same way: the same person authoring
+    // in two electorates is two unlinkable pseudonyms.
+    let n = initiative_threshold(w.tree.leaf_count());
+    let init_a = build_initiative(dev_keys(), &p_a, "Text".into(), n, 300, Secrecy::None).unwrap();
+    let init_b = build_initiative(
+        dev_keys(),
+        &p_b,
+        "Text".into(),
+        initiative_threshold(tree_b.leaf_count()),
+        300,
+        Secrecy::None,
+    )
+    .unwrap();
+    assert_ne!(init_a.author, init_b.author);
+    assert_eq!(validate_initiative(&init_a, &w.ctx), Ok(()));
+    assert_eq!(validate_initiative(&init_b, &w.ctx), Ok(()));
+}
+
 #[test]
 fn supports_initiatives_nodes_witnesses() {
     let mut w = world();
@@ -313,25 +435,6 @@ fn supports_initiatives_nodes_witnesses() {
         validate_node_registration(&bad, &w.ctx),
         Err(Invalid::BadProof)
     );
-
-    // Witness needs a known node registration and a valid signature.
-    let wit = build_witness(&node_sk, s.content_id(), w.vote_id);
-    assert!(matches!(
-        validate_witness(&wit, &w.ctx),
-        Err(Invalid::MissingReference(Reference::NodeRegistration(_)))
-    ));
-    w.ctx.nodes.insert(node_sk.public_key(), reg);
-    assert_eq!(validate(&Item::Witness(wit.clone()), &w.ctx), Ok(()));
-    let bad = Witness {
-        vote_id: [3; 32],
-        ..wit.clone()
-    };
-    assert!(matches!(
-        validate_witness(&bad, &w.ctx),
-        Err(Invalid::MissingReference(Reference::Vote(_)))
-    ));
-    w.ctx.votes.insert([3; 32], w.vote.clone());
-    assert_eq!(validate_witness(&bad, &w.ctx), Err(Invalid::BadSignature));
 }
 
 #[test]

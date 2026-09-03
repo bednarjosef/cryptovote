@@ -52,10 +52,38 @@ impl HopInfo {
 
     /// Whitepaper §12 diversity rules: distinct operators, ASNs, countries.
     // TRUST: node operators for their self-declared diversity attributes (privacy only, SPEC §6.7).
-    fn diverse_from(&self, others: &[HopInfo]) -> bool {
-        others
-            .iter()
-            .all(|o| o.operator != self.operator && o.asn != self.asn && o.country != self.country)
+    fn diverse_from(&self, others: &[HopInfo], level: Diversity) -> bool {
+        others.iter().all(|o| match level {
+            Diversity::Full => {
+                o.operator != self.operator && o.asn != self.asn && o.country != self.country
+            }
+            Diversity::SameCountry => o.operator != self.operator && o.asn != self.asn,
+            Diversity::DistinctNodes => o.node_key != self.node_key,
+        })
+    }
+}
+
+/// How much hop diversity a path got (whitepaper §12). Insisting on the best
+/// would leave a voter with one hop, or none, wherever the network is
+/// concentrated — most national deployments — so the client takes the best it
+/// can build and says which it got, the same way it does for Tor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Diversity {
+    /// No two hops share an operator, an ASN or a country.
+    Full,
+    /// Distinct operators and ASNs; some hops are in the same country.
+    SameCountry,
+    /// Only distinct nodes: one operator could be behind several of them.
+    DistinctNodes,
+}
+
+impl Diversity {
+    fn describe(self) -> &'static str {
+        match self {
+            Diversity::Full => "operator/ASN/country diverse",
+            Diversity::SameCountry => "same country",
+            Diversity::DistinctNodes => "operator diversity unknown",
+        }
     }
 }
 
@@ -66,15 +94,24 @@ pub struct PrivacyLevel {
     pub hops: usize,
     pub tor: bool,
     pub paths: usize,
+    /// The weakest diversity among the paths used.
+    pub diversity: Diversity,
 }
 
 impl std::fmt::Display for PrivacyLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let tor = if self.tor { "Tor" } else { "NO Tor" };
+        let d = self.diversity.describe();
         match self.hops {
             0 => write!(f, "DIRECT: no mix hops, {tor}"),
-            3 if self.tor => write!(f, "full: 3 mix hops + Tor, {} paths", self.paths),
-            n => write!(f, "partial: {n} mix hop(s), {tor}, {} path(s)", self.paths),
+            3 if self.tor && self.diversity == Diversity::Full => {
+                write!(f, "full: 3 mix hops + Tor, {} paths", self.paths)
+            }
+            n => write!(
+                f,
+                "partial: {n} mix hop(s), {tor}, {} path(s), {d}",
+                self.paths
+            ),
         }
     }
 }
@@ -123,36 +160,53 @@ impl Transport {
 
 /// Choose up to `want` hops: the guard first (if given and eligible), then
 /// random hops satisfying the diversity rules; shorter if not enough exist.
+/// Build one path of up to `want` hops, taking the most diverse one that
+/// reaches that length: fully diverse if the network allows it, otherwise
+/// same-country, otherwise merely distinct nodes. The level used is returned
+/// so the voter is told what they actually got.
 pub fn select_path<R: Rng>(
     rng: &mut R,
     hops: &[HopInfo],
     guard: Option<[u8; 32]>,
     exclude: &[[u8; 32]],
     want: usize,
-) -> Vec<HopInfo> {
-    let mut path: Vec<HopInfo> = Vec::new();
-    if let Some(g) = guard {
-        if let Some(h) = hops.iter().find(|h| h.node_key == g) {
-            path.push(h.clone());
+) -> (Vec<HopInfo>, Diversity) {
+    let mut best = (Vec::new(), Diversity::DistinctNodes);
+    for level in [
+        Diversity::Full,
+        Diversity::SameCountry,
+        Diversity::DistinctNodes,
+    ] {
+        let mut path: Vec<HopInfo> = Vec::new();
+        if let Some(g) = guard {
+            if let Some(h) = hops.iter().find(|h| h.node_key == g) {
+                path.push(h.clone());
+            }
         }
-    }
-    let mut candidates: Vec<&HopInfo> = hops
-        .iter()
-        .filter(|h| !exclude.contains(&h.node_key))
-        .collect();
-    candidates.shuffle(rng);
-    for c in candidates {
-        if path.len() >= want {
+        let mut candidates: Vec<&HopInfo> = hops
+            .iter()
+            .filter(|h| !exclude.contains(&h.node_key))
+            .collect();
+        candidates.shuffle(rng);
+        for c in candidates {
+            if path.len() >= want {
+                break;
+            }
+            if path.iter().any(|p| p.node_key == c.node_key) {
+                continue;
+            }
+            if c.diverse_from(&path, level) {
+                path.push(c.clone());
+            }
+        }
+        if path.len() > best.0.len() {
+            best = (path, level);
+        }
+        if best.0.len() >= want {
             break;
         }
-        if path.iter().any(|p| p.node_key == c.node_key) {
-            continue;
-        }
-        if c.diverse_from(&path) {
-            path.push(c.clone());
-        }
     }
-    path
+    best
 }
 
 fn now_unix() -> u64 {
@@ -178,6 +232,8 @@ pub struct MixClient {
     pub hops_per_path: usize,
     pub paths: usize,
     pub dev: bool,
+    /// Block headers for checking anchors (see `crate::evidence`).
+    pub headers: Option<std::sync::Arc<dyn cv_core::snapshot::Headers>>,
 }
 
 impl MixClient {
@@ -203,6 +259,7 @@ impl MixClient {
             hops_per_path: cv_core::constants::MIX_HOPS,
             paths: cv_core::constants::PATHS_PER_BALLOT,
             dev: false,
+            headers: None,
         }
     }
 
@@ -266,6 +323,7 @@ impl MixClient {
                     hops: 0,
                     tor: self.transport.is_tor(),
                     paths: 1,
+                    diversity: Diversity::DistinctNodes,
                 },
                 vec![],
             ));
@@ -273,13 +331,15 @@ impl MixClient {
         let guard = self.guard(device, &hops, &mut rng);
         let mut used: Vec<[u8; 32]> = Vec::new();
         let mut min_hops = usize::MAX;
+        let mut worst = Diversity::Full;
         let mut sent = 0;
         let mut excl: Vec<[u8; 32]> = exclude.to_vec();
         for _ in 0..self.paths {
-            let path = select_path(&mut rng, &hops, guard, &excl, self.hops_per_path);
+            let (path, diversity) = select_path(&mut rng, &hops, guard, &excl, self.hops_per_path);
             if path.is_empty() {
                 break;
             }
+            worst = worst.max(diversity);
             let route: Vec<Hop> = path.iter().map(HopInfo::hop).collect();
             let packet = build_packet(&bytes, &route)?;
             let entry = &path[0];
@@ -306,18 +366,20 @@ impl MixClient {
                 hops: min_hops,
                 tor: self.transport.is_tor(),
                 paths: sent,
+                diversity: worst,
             },
             used,
         ))
     }
 
-    /// Nullifier status through the (possibly Tor) transport, so the query
-    /// does not link the voter's IP to the nullifier.
-    pub async fn anchored_height(
+    /// Nullifier status **as the node reports it** — a hint about which
+    /// content ids to check, never a confirmation. `cast_with_retry` only
+    /// stops once `crate::evidence` has checked an anchor for itself.
+    pub async fn claimed_status(
         &self,
         vote_id: &Id,
         nullifier: &Fr,
-    ) -> anyhow::Result<Option<u32>> {
+    ) -> anyhow::Result<Vec<BallotStatusJson>> {
         let url = format!(
             "{}/v1/votes/{}/nullifier/{}",
             self.node.base_url(),
@@ -328,8 +390,7 @@ impl MixClient {
         if status != 200 {
             anyhow::bail!("status query returned {status}");
         }
-        let st: Vec<BallotStatusJson> = serde_json::from_slice(&body)?;
-        Ok(st.iter().filter_map(|s| s.anchored_height).min())
+        Ok(serde_json::from_slice(&body)?)
     }
 
     /// Cast and keep re-sending through fresh paths until the nullifier is
@@ -350,12 +411,17 @@ impl MixClient {
             .ok_or_else(|| anyhow::anyhow!("unknown vote"))?;
         let (_, leaves) = self
             .node
-            .registry(&vd.registry_root)
+            .registry(&vd.issuer_key, &vd.registry_root)
             .await?
             .ok_or_else(|| anyhow::anyhow!("registry not available"))?;
         let p: Participant = device
-            .participant(&leaves)
+            .participant(&vd.issuer_key, &leaves)
             .ok_or_else(|| anyhow::anyhow!("device not enrolled in this registry"))?;
+        // The node served these leaves; they must build the root the vote names.
+        anyhow::ensure!(
+            p.registry_root == vd.registry_root,
+            "the leaves the node served do not build the vote's registry root"
+        );
         let ballot = prepare_ballot(&self.node, keys, &p, &vd, option, self.dev).await?;
         let bytes = Item::Ballot(ballot.clone()).encode();
         let mut exclude: Vec<[u8; 32]> = Vec::new();
@@ -363,16 +429,28 @@ impl MixClient {
             hops: 0,
             tor: self.transport.is_tor(),
             paths: 0,
+            diversity: Diversity::DistinctNodes,
         };
         for attempt in 1..=max_attempts {
             let (privacy, used) = self.send_item(device, bytes.clone(), &exclude).await?;
             last_privacy = privacy;
             let deadline = Instant::now() + window;
+            let content_id = ballot.content_id();
             loop {
-                if let Some(h) = self.anchored_height(vote_id, &ballot.nullifier).await? {
+                // The node's "anchored" is only a hint; the anchor itself is
+                // checked before the voter stops resending.
+                let _ = self.claimed_status(vote_id, &ballot.nullifier).await;
+                if let Some(e) = crate::evidence::anchor_evidence(
+                    &self.node,
+                    &content_id,
+                    self.headers.as_deref(),
+                    self.dev,
+                )
+                .await?
+                {
                     return Ok(CastReport {
                         ballot,
-                        anchored_height: Some(h),
+                        anchored_height: Some(e.height),
                         privacy,
                         attempts: attempt,
                     });
@@ -400,7 +478,10 @@ impl MixClient {
             return Ok(false);
         }
         let guard = self.guard(device, &hops, &mut rng);
-        let path = select_path(&mut rng, &hops, guard, &[], self.hops_per_path);
+        let (path, _) = select_path(&mut rng, &hops, guard, &[], self.hops_per_path);
+        if path.is_empty() {
+            return Ok(false);
+        }
         let route: Vec<Hop> = path.iter().map(HopInfo::hop).collect();
         let packet = build_packet(&decoy_payload(&mut rng, 300), &route)?;
         let (status, _) = self
@@ -442,35 +523,67 @@ mod tests {
             hop(4, "a", "PL", 4),
             hop(5, "d", "CZ", 5),
         ];
-        let p = select_path(&mut rng, &hops, Some([1; 32]), &[], 3);
+        let (p, level) = select_path(&mut rng, &hops, Some([1; 32]), &[], 3);
         assert_eq!(p.len(), 3);
+        assert_eq!(level, Diversity::Full, "the network allows the best");
         assert_eq!(p[0].node_key, [1; 32], "guard is the entry");
         let ops: HashSet<&str> = p.iter().map(|h| h.operator.as_str()).collect();
         let ccs: HashSet<&str> = p.iter().map(|h| h.country.as_str()).collect();
         assert_eq!(ops.len(), 3);
         assert_eq!(ccs.len(), 3);
-        // Only two mutually diverse hops exist → shortened to 2; one hop → 1.
-        let two = vec![
+
+        // One country, distinct operators: a full-length path is still built,
+        // and the voter is told it is all in one place.
+        let one_country = vec![
             hop(1, "a", "CZ", 1),
-            hop(2, "a", "DE", 2),
-            hop(3, "b", "DE", 3),
+            hop(2, "b", "CZ", 2),
+            hop(3, "c", "CZ", 3),
         ];
-        let p = select_path(&mut rng, &two, None, &[], 3);
-        assert!(p.len() <= 2 && !p.is_empty());
+        let (p, level) = select_path(&mut rng, &one_country, None, &[], 3);
+        assert_eq!(p.len(), 3);
+        assert_eq!(level, Diversity::SameCountry);
+        assert!(
+            PrivacyLevel {
+                hops: 3,
+                tor: true,
+                paths: 2,
+                diversity: level,
+            }
+            .to_string()
+            .contains("same country"),
+            "and it says so"
+        );
+
+        // One operator behind everything: still three hops, still labelled.
+        let one_operator = vec![
+            hop(1, "a", "CZ", 1),
+            hop(2, "a", "CZ", 1),
+            hop(3, "a", "CZ", 1),
+        ];
+        let (p, level) = select_path(&mut rng, &one_operator, None, &[], 3);
+        assert_eq!(p.len(), 3);
+        assert_eq!(level, Diversity::DistinctNodes);
+
         let one = vec![hop(9, "z", "ZZ", 9)];
-        assert_eq!(select_path(&mut rng, &one, None, &[], 3).len(), 1);
-        assert!(select_path(&mut rng, &one, None, &[[9; 32]], 3).is_empty());
+        assert_eq!(select_path(&mut rng, &one, None, &[], 3).0.len(), 1);
+        assert!(
+            select_path(&mut rng, &one, None, &[[9; 32]], 3)
+                .0
+                .is_empty()
+        );
         let full = PrivacyLevel {
             hops: 3,
             tor: true,
             paths: 2,
+            diversity: Diversity::Full,
         };
         assert!(full.to_string().starts_with("full"));
         assert!(
             PrivacyLevel {
                 hops: 0,
                 tor: false,
-                paths: 1
+                paths: 1,
+                diversity: Diversity::DistinctNodes,
             }
             .to_string()
             .starts_with("DIRECT")

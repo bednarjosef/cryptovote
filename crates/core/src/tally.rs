@@ -14,52 +14,26 @@ use std::collections::{BTreeMap, BTreeSet};
 pub trait LogView: Context {
     fn ballots_of(&self, vote_id: &Id) -> Vec<Ballot>;
     fn supports_of(&self, initiative_id: &Id) -> Vec<Support>;
-    fn witnesses_of(&self, content_id: &Id) -> Vec<Witness>;
     fn keyparties_of(&self, vote_id: &Id) -> Vec<KeyParty>;
     fn shares_of(&self, keyparty_id: &Id) -> Vec<Share>;
     /// Lowest height of any valid anchor covering the item.
     fn anchored_height(&self, content_id: &Id) -> Option<u32>;
-    /// Whether any valid anchor exists at or below `height`.
-    fn any_anchor_at_or_before(&self, height: u32) -> bool;
     fn tip_height(&self) -> Option<u32>;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Guarantee {
-    /// Every counted ballot is under a Bitcoin-anchored root at height ≤ close.
-    Anchored,
-    /// No anchor exists for the vote; ballots were admitted by ≥ W witness
-    /// signatures (whitepaper §9 degraded mode).
-    Fallback,
-}
-
-impl std::fmt::Display for Guarantee {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Guarantee::Anchored => "anchored",
-            Guarantee::Fallback => {
-                "FALLBACK (witness signatures; colluding nodes could have backdated)"
-            }
-        })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Result {
-        guarantee: Guarantee,
         counts: Vec<u64>,
         counted: u64,
     },
     BelowMinimum {
-        guarantee: Guarantee,
         counted: u64,
     },
     /// `keyparties` only: the header tip is not past `close_block`.
     NotClosed,
     /// `keyparties` only: shares still missing.
     Pending {
-        guarantee: Guarantee,
         missing_shares: Vec<Id>,
     },
 }
@@ -89,47 +63,24 @@ pub fn unique_by_nullifier<T: Clone>(
         .collect()
 }
 
-/// Ballots that are inside the deadline, and under which guarantee.
-fn timely_ballots(
-    view: &impl LogView,
-    vd: &VoteDefinition,
-    ballots: Vec<Ballot>,
-) -> (Guarantee, Vec<Ballot>) {
-    let anchored: Vec<Ballot> = ballots
-        .iter()
+/// Ballots inside the deadline: anchored in Bitcoin at or before
+/// `close_block`. There is no other way to be timely — a node saying it saw
+/// something is not a clock (A16).
+fn timely_ballots(view: &impl LogView, vd: &VoteDefinition, ballots: Vec<Ballot>) -> Vec<Ballot> {
+    ballots
+        .into_iter()
         .filter(|b| {
             view.anchored_height(&b.content_id())
                 .is_some_and(|h| h <= vd.close_block)
         })
-        .cloned()
-        .collect();
-    if !anchored.is_empty() || view.any_anchor_at_or_before(vd.close_block) {
-        return (Guarantee::Anchored, anchored);
-    }
-    // Whitepaper §9 fallback: ≥ W distinct registered nodes witnessed the ballot.
-    let witnessed = ballots
-        .into_iter()
-        .filter(|b| {
-            let cid = b.content_id();
-            let signers: BTreeSet<[u8; 32]> = view
-                .witnesses_of(&cid)
-                .into_iter()
-                .filter(|w| {
-                    w.vote_id == vd.vote_id() && view.node_registration(&w.node_key).is_some()
-                })
-                .map(|w| w.node_key)
-                .collect();
-            signers.len() >= WITNESS_THRESHOLD_W
-        })
-        .collect();
-    (Guarantee::Fallback, witnessed)
+        .collect()
 }
 
 /// SPEC §12. `None` if the vote is unknown.
 pub fn tally(view: &impl LogView, vote_id: &Id) -> Option<Outcome> {
     let vd = view.vote(vote_id)?;
     let ballots = view.ballots_of(vote_id);
-    let (guarantee, timely) = timely_ballots(view, &vd, ballots);
+    let timely = timely_ballots(view, &vd, ballots);
     let unique = unique_by_nullifier(&timely, |b| fr_to_bytes(&b.nullifier), |b| b.content_id());
     let mut counts = vec![0u64; vd.options.len()];
     match vd.secrecy {
@@ -171,7 +122,6 @@ pub fn tally(view: &impl LogView, vote_id: &Id) -> Option<Outcome> {
                 .collect();
             if !missing.is_empty() {
                 return Some(Outcome::Pending {
-                    guarantee,
                     missing_shares: missing,
                 });
             }
@@ -184,13 +134,9 @@ pub fn tally(view: &impl LogView, vote_id: &Id) -> Option<Outcome> {
     }
     let counted: u64 = counts.iter().sum();
     if counted < vd.min_ballots as u64 {
-        return Some(Outcome::BelowMinimum { guarantee, counted });
+        return Some(Outcome::BelowMinimum { counted });
     }
-    Some(Outcome::Result {
-        guarantee,
-        counts,
-        counted,
-    })
+    Some(Outcome::Result { counts, counted })
 }
 
 /// SPEC §13. `None` if the initiative is unknown or below threshold.
@@ -212,6 +158,7 @@ pub fn derive_vote(view: &impl LogView, initiative_id: &Id) -> Option<VoteDefini
     Some(VoteDefinition {
         question: init.text.clone(),
         options: vec!["Yes".into(), "No".into()],
+        issuer_key: init.issuer_key,
         registry_root: init.registry_root,
         open_block: open,
         close_block: open + INITIATIVE_VOTE_BLOCKS,
@@ -226,32 +173,14 @@ pub fn derive_vote(view: &impl LogView, initiative_id: &Id) -> Option<VoteDefini
 impl Outcome {
     /// JSON form served by nodes and printed by the verifier.
     pub fn to_wire(&self, vote_id: &Id, vd: &VoteDefinition) -> crate::wire::ResultJson {
-        let (outcome, guarantee, counts, counted, missing) = match self {
-            Outcome::Result {
-                guarantee,
-                counts,
-                counted,
-            } => (
-                "result",
-                Some(guarantee.to_string()),
-                Some(counts.clone()),
-                Some(*counted),
-                vec![],
-            ),
-            Outcome::BelowMinimum { guarantee, counted } => (
-                "below_minimum",
-                Some(guarantee.to_string()),
-                None,
-                Some(*counted),
-                vec![],
-            ),
-            Outcome::NotClosed => ("not_closed", None, None, None, vec![]),
-            Outcome::Pending {
-                guarantee,
-                missing_shares,
-            } => (
+        let (outcome, counts, counted, missing) = match self {
+            Outcome::Result { counts, counted } => {
+                ("result", Some(counts.clone()), Some(*counted), vec![])
+            }
+            Outcome::BelowMinimum { counted } => ("below_minimum", None, Some(*counted), vec![]),
+            Outcome::NotClosed => ("not_closed", None, None, vec![]),
+            Outcome::Pending { missing_shares } => (
                 "pending",
-                Some(guarantee.to_string()),
                 None,
                 None,
                 missing_shares.iter().map(hex::encode).collect(),
@@ -259,11 +188,11 @@ impl Outcome {
         };
         crate::wire::ResultJson {
             vote_id: hex::encode(vote_id),
+            issuer_key: hex::encode(vd.issuer_key),
             question: vd.question.clone(),
             options: vd.options.clone(),
             secrecy: format!("{:?}", vd.secrecy).to_lowercase(),
             outcome: outcome.into(),
-            guarantee,
             counts,
             counted,
             missing_shares: missing,

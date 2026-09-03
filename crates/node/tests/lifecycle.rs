@@ -60,7 +60,7 @@ async fn full_lifecycle_in_dev_mode() {
     // Node with the dev anchorer.
     let deployment = Deployment {
         authority_keys: vec![authority.public_key()],
-        issuer_key,
+        issuer_keys: vec![issuer_key],
         dev_mode: true,
     };
     let log = Log::open(
@@ -94,22 +94,27 @@ async fn full_lifecycle_in_dev_mode() {
     )
     .await
     .unwrap();
-    let pc = ParticipantClient::new(NodeClient::new(node_url.clone()), keys.clone());
+    let pc = ParticipantClient {
+        dev: true,
+        ..ParticipantClient::new(NodeClient::new(node_url.clone()), keys.clone())
+    };
 
-    // 12 people enroll (mock eID accepts anyone); one re-enrolls (replacement).
+    // 12 people enroll (the mock backend accepts anyone); one re-enrolls with
+    // the same dedup key, which replaces their leaf in place.
     let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
     let mut devices: Vec<Device> = (0..12).map(|_| Device::generate(&mut rng)).collect();
     for (i, d) in devices.iter_mut().enumerate() {
         let r = pc
-            .enroll(d, &issuer.url(), &format!("eid-{i}"))
+            .enroll(d, &issuer.url(), &format!("person-{i}"))
             .await
             .unwrap();
         assert_eq!(r.index, i as u32);
         assert!(!r.replaced);
+        assert_eq!(r.issuer_key, hex::encode(issuer_key));
     }
     let mut replacement = Device::generate(&mut rng);
     let r = pc
-        .enroll(&mut replacement, &issuer.url(), "eid-11")
+        .enroll(&mut replacement, &issuer.url(), "person-11")
         .await
         .unwrap();
     assert_eq!(r.index, 11);
@@ -118,6 +123,7 @@ async fn full_lifecycle_in_dev_mode() {
     let regs = pc.node.registries().await.unwrap();
     let latest = regs.iter().max_by_key(|r| r.epoch).unwrap();
     assert_eq!(latest.leaf_count, 12);
+    assert_eq!(latest.issuer_key, hex::encode(issuer_key));
     let root = fr_from_canonical(&hex::decode(&latest.root).unwrap().try_into().unwrap()).unwrap();
 
     // Authority vote.
@@ -126,6 +132,7 @@ async fn full_lifecycle_in_dev_mode() {
         VoteDefinition {
             question: "Should the bridge be built?".into(),
             options: vec!["Yes".into(), "No".into(), "Abstain".into()],
+            issuer_key,
             registry_root: root,
             open_block: 100,
             close_block: 200,
@@ -169,8 +176,9 @@ async fn full_lifecycle_in_dev_mode() {
     assert_eq!(resp, SubmitResponse::AlreadyHave);
 
     let result = pc.result(&vid).await.unwrap().unwrap();
+    // Every result names the Issuer whose electorate it was counted over.
+    assert_eq!(result.issuer_key, hex::encode(issuer_key));
     assert_eq!(result.outcome, "result");
-    assert_eq!(result.guarantee.as_deref(), Some("anchored"));
     assert_eq!(result.counts.unwrap(), expected.to_vec());
     assert_eq!(result.counted, Some(9));
 
@@ -200,6 +208,7 @@ async fn full_lifecycle_in_dev_mode() {
     let (init, resp) = pc
         .create_initiative(
             &devices[5],
+            &issuer_key,
             &root,
             "Ban leaf blowers".into(),
             180,
@@ -260,7 +269,6 @@ async fn full_lifecycle_in_dev_mode() {
         "derived votes use the protocol min_ballots of 100"
     );
     assert_eq!(r.counted, Some(4));
-    assert_eq!(r.guarantee.as_deref(), Some("anchored"));
 
     issuer.shutdown();
     node.shutdown().await;

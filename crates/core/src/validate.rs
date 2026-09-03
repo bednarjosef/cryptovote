@@ -17,7 +17,7 @@ pub enum Invalid {
     MissingReference(Reference),
     #[error("bad structure: {0}")]
     Structure(&'static str),
-    #[error("registry root unknown")]
+    #[error("registry root unknown for this issuer")]
     UnknownRegistry,
     #[error("authority key not recognized")]
     UnknownAuthority,
@@ -43,7 +43,8 @@ pub enum Reference {
     Initiative(Id),
     KeyParty(Id),
     NodeRegistration([u8; 32]),
-    Registry(Fr),
+    /// A Registry snapshot of one Issuer, by `(issuer_key, root)`.
+    Registry([u8; 32], Fr),
     Header(u32),
     /// The initiative's threshold is not (yet) reached in this view.
     DerivedVote(Id),
@@ -56,7 +57,9 @@ impl std::fmt::Display for Reference {
             Reference::Initiative(id) => write!(f, "initiative {}", hex4(id)),
             Reference::KeyParty(id) => write!(f, "key party {}", hex4(id)),
             Reference::NodeRegistration(k) => write!(f, "node registration {}", hex4(k)),
-            Reference::Registry(_) => write!(f, "registry snapshot"),
+            Reference::Registry(issuer, _) => {
+                write!(f, "registry snapshot of issuer {}", hex4(issuer))
+            }
             Reference::Header(h) => write!(f, "block header at height {h}"),
             Reference::DerivedVote(id) => write!(f, "derived vote of initiative {}", hex4(id)),
         }
@@ -81,15 +84,20 @@ pub fn validate(item: &Item, ctx: &impl Context) -> Result<(), Invalid> {
         Item::Anchor(v) => validate_anchor(v, ctx),
         Item::KeyParty(v) => validate_keyparty(v, ctx),
         Item::NodeRegistration(v) => validate_node_registration(v, ctx),
-        Item::Witness(v) => validate_witness(v, ctx),
         Item::Share(v) => validate_share(v, ctx),
     }
 }
 
-fn require_registry(ctx: &impl Context, root: &Fr) -> Result<u64, Invalid> {
-    ctx.registry(root)
+/// A registry root is usable by an item only through the Issuer the item
+/// names: the snapshot with that root must carry that Issuer's signature
+/// (SPEC §4.3). Returns the electorate size.
+fn require_registry(ctx: &impl Context, issuer_key: &[u8; 32], root: &Fr) -> Result<u64, Invalid> {
+    ctx.registry(issuer_key, root)
         .map(|r| r.leaf_count)
-        .ok_or(Invalid::MissingReference(Reference::Registry(*root)))
+        .ok_or(Invalid::MissingReference(Reference::Registry(
+            *issuer_key,
+            *root,
+        )))
 }
 
 fn check_membership(
@@ -128,7 +136,7 @@ pub fn validate_vote(v: &VoteDefinition, ctx: &impl Context) -> Result<(), Inval
     if v.open_block >= v.close_block || v.close_block - v.open_block > MAX_VOTE_BLOCKS {
         return Err(Invalid::Structure("open/close blocks"));
     }
-    require_registry(ctx, &v.registry_root)?;
+    require_registry(ctx, &v.issuer_key, &v.registry_root)?;
     match &v.origin {
         Origin::Authority {
             authority_key,
@@ -166,7 +174,7 @@ pub fn validate_initiative(v: &Initiative, ctx: &impl Context) -> Result<(), Inv
     if v.text.is_empty() {
         return Err(Invalid::Structure("empty text"));
     }
-    let size = require_registry(ctx, &v.registry_root)?;
+    let size = require_registry(ctx, &v.issuer_key, &v.registry_root)?;
     if v.threshold_n != initiative_threshold(size) {
         return Err(Invalid::Structure("threshold_N is not the protocol value"));
     }
@@ -175,7 +183,7 @@ pub fn validate_initiative(v: &Initiative, ctx: &impl Context) -> Result<(), Inv
         v.registry_root,
         v.author,
         TAG_AUTHOR,
-        None,
+        Some(&v.issuer_key),
         &v.content_id(),
         &v.proof,
     )
@@ -242,6 +250,52 @@ pub fn validate_ballot(v: &Ballot, ctx: &impl Context) -> Result<(), Invalid> {
     )
 }
 
+/// Does an anchor proof really put `root` in the Bitcoin block at its own
+/// claimed height, whose transaction Merkle root is `block_root`? (SPEC §6.5.)
+///
+/// The one implementation of this rule: nodes and the verifier reach it
+/// through [`validate_anchor`], and a voter's client calls it directly to
+/// check the anchor it was handed as evidence that its own ballot is in.
+pub fn check_anchor_proof(
+    proof: &AnchorProof,
+    root: &[u8; 32],
+    block_root: &[u8; 32],
+    dev_mode: bool,
+) -> Result<(), Invalid> {
+    match proof {
+        AnchorProof::Dev { .. } => {
+            if dev_mode {
+                Ok(())
+            } else {
+                Err(Invalid::DevOnly)
+            }
+        }
+        AnchorProof::Ots { ots, height } => {
+            // TRUST: OTS calendars for liveness only (whitepaper §2) — the proof is recomputed here.
+            let ts = cv_crypto::ots::parse(root, ots)
+                .map_err(|_| Invalid::Structure("ots proof does not parse"))?;
+            let att = cv_crypto::ots::attestations(&ts);
+            if att
+                .bitcoin
+                .iter()
+                .any(|(h, d)| h == height && d.as_slice() == block_root)
+            {
+                Ok(())
+            } else if att.bitcoin.is_empty() && !att.pending.is_empty() {
+                Err(Invalid::Unverified)
+            } else {
+                Err(Invalid::BadAnchorProof)
+            }
+        }
+        AnchorProof::Direct {
+            raw_tx,
+            partial_merkle_tree,
+            ..
+        } => cv_crypto::spv::verify_direct(raw_tx, partial_merkle_tree, root, block_root)
+            .map_err(|_| Invalid::BadAnchorProof),
+    }
+}
+
 /// SPEC §6.5.
 pub fn validate_anchor(v: &Anchor, ctx: &impl Context) -> Result<(), Invalid> {
     if v.leaves.is_empty() || v.leaves.len() > MAX_ANCHOR_LEAVES {
@@ -256,37 +310,7 @@ pub fn validate_anchor(v: &Anchor, ctx: &impl Context) -> Result<(), Invalid> {
         .block_merkle_root(height)
         .ok_or(Invalid::MissingReference(Reference::Header(height)))?;
     let root = cv_crypto::merkle::anchor_root(&v.leaves).expect("non-empty leaves");
-    match &v.proof {
-        AnchorProof::Dev { .. } => {
-            if !ctx.dev_mode() {
-                return Err(Invalid::DevOnly);
-            }
-            Ok(())
-        }
-        AnchorProof::Ots { ots, .. } => {
-            // TRUST: OTS calendars for liveness only (whitepaper §2) — the proof is recomputed here.
-            let ts = cv_crypto::ots::parse(&root, ots)
-                .map_err(|_| Invalid::Structure("ots proof does not parse"))?;
-            let att = cv_crypto::ots::attestations(&ts);
-            if att
-                .bitcoin
-                .iter()
-                .any(|(h, d)| *h == height && d.as_slice() == block_root)
-            {
-                Ok(())
-            } else if att.bitcoin.is_empty() && !att.pending.is_empty() {
-                Err(Invalid::Unverified)
-            } else {
-                Err(Invalid::BadAnchorProof)
-            }
-        }
-        AnchorProof::Direct {
-            raw_tx,
-            partial_merkle_tree,
-            ..
-        } => cv_crypto::spv::verify_direct(raw_tx, partial_merkle_tree, &root, &block_root)
-            .map_err(|_| Invalid::BadAnchorProof),
-    }
+    check_anchor_proof(&v.proof, &root, &block_root, ctx.dev_mode())
 }
 
 /// SPEC §6.6.
@@ -297,6 +321,7 @@ pub fn validate_keyparty(v: &KeyParty, ctx: &impl Context) -> Result<(), Invalid
     if vote.secrecy != Secrecy::KeyParties {
         return Err(Invalid::Structure("vote has no key parties"));
     }
+    // The party's electorate is the vote's: same Issuer, same root.
     if v.registry_root != vote.registry_root {
         return Err(Invalid::Structure("registry root differs from the vote"));
     }
@@ -320,33 +345,16 @@ pub fn validate_node_registration(v: &NodeRegistration, ctx: &impl Context) -> R
     if v.endpoint.is_empty() || v.endpoint.len() > MAX_ENDPOINT_BYTES {
         return Err(Invalid::Structure("endpoint length"));
     }
-    require_registry(ctx, &v.registry_root)?;
+    require_registry(ctx, &v.issuer_key, &v.registry_root)?;
     check_membership(
         ctx,
         v.registry_root,
         v.nullifier,
         TAG_NODE,
-        None,
+        Some(&v.issuer_key),
         &v.content_id(),
         &v.proof,
     )
-}
-
-/// SPEC §6.8.
-pub fn validate_witness(v: &Witness, ctx: &impl Context) -> Result<(), Invalid> {
-    ctx.vote(&v.vote_id)
-        .ok_or(Invalid::MissingReference(Reference::Vote(v.vote_id)))?;
-    ctx.node_registration(&v.node_key)
-        .ok_or(Invalid::MissingReference(Reference::NodeRegistration(
-            v.node_key,
-        )))?;
-    let mut payload = v.content_id.to_vec();
-    payload.extend_from_slice(&v.vote_id);
-    if verify(&v.node_key, Domain::Witness, &payload, &v.signature) {
-        Ok(())
-    } else {
-        Err(Invalid::BadSignature)
-    }
 }
 
 /// SPEC §6.9.

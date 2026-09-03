@@ -101,12 +101,14 @@ fn registry_tree_roots_and_paths() {
     // Snapshot signing.
     let issuer = SigningKey::from_seed(&[3u8; 32]);
     let snap = RegistrySnapshot::sign(&issuer, 5, &tree);
-    assert!(snap.verify(&issuer.public_key()));
-    assert!(!snap.verify(&SigningKey::from_seed(&[4u8; 32]).public_key()));
+    assert!(snap.verify());
+    assert!(snap.verify_by(&issuer.public_key()));
+    // Signed by this Issuer, but not by the one the caller expected.
+    assert!(!snap.verify_by(&SigningKey::from_seed(&[4u8; 32]).public_key()));
     assert_eq!(RegistrySnapshot::decode(&snap.encode()).unwrap(), snap);
     let mut bad = snap.clone();
     bad.leaf_count += 1;
-    assert!(!bad.verify(&issuer.public_key()));
+    assert!(!bad.verify());
 }
 
 fn member(tree: &RegistryTree, secret: Fr, index: u32) -> MembershipWitness {

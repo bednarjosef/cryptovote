@@ -35,8 +35,11 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/anchors", get(anchors))
         .route("/v1/anchors/{id}/proof/{cid}", get(anchor_proof))
         .route("/v1/registry", get(registries).post(post_registry))
-        .route("/v1/registry/{root}/snapshot", get(registry_snapshot))
-        .route("/v1/registry/{root}/leaves", get(registry_leaves))
+        .route(
+            "/v1/registry/{issuer}/{root}/snapshot",
+            get(registry_snapshot),
+        )
+        .route("/v1/registry/{issuer}/{root}/leaves", get(registry_leaves))
         .route("/v1/headers/tip", get(tip))
         .route("/v1/snapshot", get(snapshot))
         .with_state(node)
@@ -172,6 +175,7 @@ async fn votes(State(node): State<Arc<Node>>) -> Json<Vec<VoteSummary>> {
         .votes()
         .map(|(id, v)| VoteSummary {
             vote_id: hex::encode(id),
+            issuer_key: hex::encode(v.issuer_key),
             question: v.question.clone(),
             options: v.options.clone(),
             open_block: v.open_block,
@@ -265,17 +269,19 @@ async fn anchor_proof(
 
 async fn registries(State(node): State<Arc<Node>>) -> Json<Vec<RegistrySummary>> {
     let log = node.log.lock().unwrap();
-    Json(
-        log.registry_roots()
-            .iter()
-            .filter_map(|r| log.registry_snapshot(r))
-            .map(|s| RegistrySummary {
-                root: hex::encode(fr_to_bytes(&s.root)),
-                epoch: s.epoch,
-                leaf_count: s.leaf_count,
-            })
-            .collect(),
-    )
+    let mut out: Vec<RegistrySummary> = log
+        .registry_ids()
+        .iter()
+        .filter_map(|id| log.registry_snapshot(id))
+        .map(|s| RegistrySummary {
+            issuer_key: hex::encode(s.issuer_key),
+            root: hex::encode(fr_to_bytes(&s.root)),
+            epoch: s.epoch,
+            leaf_count: s.leaf_count,
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.issuer_key, &a.root).cmp(&(&b.issuer_key, &b.root)));
+    Json(out)
 }
 
 /// Body: snapshot (144 bytes) followed by the leaves file.
@@ -301,23 +307,29 @@ async fn post_registry(State(node): State<Arc<Node>>, body: Bytes) -> Response {
     }
 }
 
-async fn registry_snapshot(State(node): State<Arc<Node>>, Path(root): Path<String>) -> Response {
-    let Some(root) = parse_fr(&root) else {
+async fn registry_snapshot(
+    State(node): State<Arc<Node>>,
+    Path((issuer, root)): Path<(String, String)>,
+) -> Response {
+    let (Some(issuer), Some(root)) = (parse_id(&issuer), parse_fr(&root)) else {
         return not_found();
     };
     let log = node.log.lock().unwrap();
-    match log.registry_snapshot(&root) {
+    match log.registry_snapshot(&(issuer, root)) {
         Some(s) => octets(s.encode()),
         None => not_found(),
     }
 }
 
-async fn registry_leaves(State(node): State<Arc<Node>>, Path(root): Path<String>) -> Response {
-    let Some(root) = parse_fr(&root) else {
+async fn registry_leaves(
+    State(node): State<Arc<Node>>,
+    Path((issuer, root)): Path<(String, String)>,
+) -> Response {
+    let (Some(issuer), Some(root)) = (parse_id(&issuer), parse_fr(&root)) else {
         return not_found();
     };
     let log = node.log.lock().unwrap();
-    match log.registry_leaves(&root) {
+    match log.registry_leaves(&(issuer, root)) {
         Some(l) => octets(encode_leaves(l)),
         None => not_found(),
     }
@@ -355,6 +367,7 @@ async fn initiatives(State(node): State<Arc<Node>>) -> Json<Vec<InitiativeSummar
         .initiatives()
         .map(|(id, i)| InitiativeSummary {
             initiative_id: hex::encode(id),
+            issuer_key: hex::encode(i.issuer_key),
             text: i.text.clone(),
             threshold_n: i.threshold_n,
             support_deadline_block: i.support_deadline_block,
@@ -382,6 +395,7 @@ async fn nodes(State(node): State<Arc<Node>>) -> Json<Vec<NodeSummary>> {
         })
         .map(|r| NodeSummary {
             node_key: hex::encode(r.node_key),
+            issuer_key: hex::encode(r.issuer_key),
             mix_key: hex::encode(r.mix_key),
             endpoint: r.endpoint.clone(),
             operator: r.operator.clone(),
