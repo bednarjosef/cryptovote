@@ -2,7 +2,9 @@
 
 Every place where the whitepaper is silent, ambiguous, or (in one case)
 internally inconsistent, with the choice made and why. Numbered `A<n>` and
-referenced from `SPEC.md`. Genuine blockers are in `BLOCKERS.md`.
+referenced from `SPEC.md`. The resolved blocker is in `BLOCKERS.md`; the
+secrecy design that replaced whitepaper §7 is in `SPEC.md` §10–§11 and
+A35–A40 below.
 
 ## Hashing and identity
 
@@ -38,10 +40,11 @@ be re-randomized by anyone into a different, still-valid proof for the same
 statement. Under a literal reading of §6 ("byte-identical → retransmission;
 different → double action"), any relay could invalidate any honest ballot it
 sees by re-randomizing its proof and forwarding both versions. Resolution:
-every proof-bearing item has an `item_id` = BLAKE3 of its bytes *without the
-proof*; the duplicate rule, anchor leaves and the client's "my nullifier is
-anchored" check all use `item_id`. The proof binds the content through the
-public `signal = fr_mod(item_id)`, so content cannot be altered either. The
+every proof-bearing item has a **content id** = BLAKE3 of its bytes *without
+the proof*; the duplicate rule ("same nullifier, same content id" = retransmission,
+"same nullifier, different content id" = double action), anchor leaves and the
+client's "my nullifier is anchored" check all use the content id. The proof binds the content through the
+public `signal = fr_mod(content_id)`, so content cannot be altered either. The
 whitepaper's determinism requirement (§8) is still met: the device stores and
 retransmits exact bytes, and proof randomness is derived from `s` (A20).
 
@@ -95,9 +98,11 @@ delta anchoring (A15). `open_block` is used for puzzle sizing and as the
 earliest time the client casts.
 
 **A6 — "Published before the Solution".** The Log has no order, so "before"
-can only be measured through anchors. Given anchoring at ≤ `close_block` and a
-puzzle sized to finish after `close_block`, the condition is implied and is
-not evaluated separately.
+can only be measured through anchors. There is no Solution item any more
+(A35); under `keyparties` decryption is gated on the verifier's header tip
+being past `close_block` and on every needed share being present, and only
+ballots anchored at ≤ `close_block` are decrypted, so the condition has no
+separate analogue.
 
 **A14 — Headers.** A node uses a header only once it has 6 descendants; the
 verifier takes its header file as the user's choice of chain. Header sources
@@ -133,7 +138,8 @@ support count to `N`, which changes if an anchor for an *earlier* block is
 published later (proofs can be published at any time). Every ballot cast to
 the previously derived `vote_id` would then be orphaned — a free denial of
 service for any anchorer. Resolution: `open_block = support_deadline_block +
-144`, `close_block = open_block + 1008`, `min_ballots = 100`. The derived
+144`, `close_block = open_block + 1008`, `min_ballots = 100`, `secrecy` copied
+from the Initiative (A39). The derived
 definition is then a stable function of the initiative alone, gated by the
 (monotone, up to A4) predicate "≥ N supports anchored by the deadline".
 
@@ -143,26 +149,82 @@ item has no options field in §6; the text becomes the question.
 **A21 — Registry root of a derived vote** is the initiative's root (the only
 root that is deterministically available).
 
-## Puzzle and encryption (subject to BLOCKERS.md #1)
+## Secrecy: key parties (replaces whitepaper §7; decision recorded in BLOCKERS.md #1)
 
-**A2 — Puzzle inputs include `blockhash(open_block)`.** `D` and `g` derived
-from `vote_id` alone are known as soon as the definition is published, so a
-solver could start the sequential computation weeks before `open_block` and
-finish before `close_block`. Mixing the hash of block `open_block` into the
-discriminant seed makes the computation impossible to start early.
+**A35 — Per-vote `secrecy` field, `none` first.** Whitepaper §7's shared
+puzzle key is not realizable (BLOCKERS.md #1). Each VoteDefinition carries
+`secrecy ∈ {none, keyparties}`. Under `none` the ballot carries the option
+index in the clear and the running count is public by design; this mode is
+implemented first and Phases 3–9 are completed on it. Under `keyparties`
+(Phase 10) ballots are exponent-ElGamal ciphertexts under the aggregate key of
+the vote's registered key parties, each of which time-locks its secret key in
+a verifiable timed commitment (VTC). The `Solution` item, `puzzle_T`, and the
+`discriminant`/`generator` tags are gone; `KeyParty` (0x06) and `Share` (0x09)
+items exist instead.
 
-**A13 — `S_MAX = 2^20` squarings/s, `M = 3/2`** (integer formula
-`(close − open) × 600 × 2^20 × 3 / 2`). Whitepaper leaves `S_MAX` open.
-Dev mode uses `T = 1024`.
+**A36 — Secrecy assumption.** Secrecy until `close_block` holds if at least
+one key party declared by a ballot is honest (keeps its share secret and
+chose a sufficient delay). Full collusion of all key parties yields only an
+early *anonymous* count; it never reveals identities and cannot affect
+integrity, ordering, or the result.
 
-**A19 — The ciphertext carries its nonce.** `r = H(s, "rand", vote_id)` is
-secret-derived, so the decryptor cannot recompute it; the 24-byte nonce
-(`r[0..24]`) is prefixed to the AEAD output. Associated data is
-`vote_id || nullifier`. Plaintext is one byte (option index).
+**A37 — Sybil liveness cost.** An attacker holding `k` credentials can
+register `k` key parties (one per person and vote, enforced by the
+`poseidon(s, "keyparty", vote_id)` nullifier) and withhold their shares,
+forcing defenders to spend `k` parallel `T`-length sequential computations
+before the result appears. This is a liveness cost only, bounded by the
+Issuer's Sybil resistance.
+
+**A38 — Ballots declare their party set.** A key party's registration can be
+anchored before `open_block` but its Anchor item published only after ballots
+were cast; if `PK` were defined as "all parties anchored before open", such a
+late anchor would change `PK` and make every honest ballot undecryptable. So
+each ballot lists the `keyparty_id`s it encrypted to (sorted, ≤ 32), and
+decryption of that ballot needs exactly those shares. The counting rule
+requires each declared party to have been anchored before `open_block`
+(otherwise the ballot is discarded), which bounds the attack of A37 to parties
+registered in time. The delay requirement `T_i ≥ required_delay(close − h_a)`
+and the duplicate rule are applied by the *client* when choosing parties and
+reported by verifiers as a secrecy label; they are not counting conditions,
+because a late-surfacing anchor could otherwise retroactively invalidate a
+party and strand the ballots that declared it.
+
+**A39 — Secrecy of initiative-derived votes** is chosen by the initiative's
+author: the Initiative item carries a `secrecy` byte that is copied into the
+derived VoteDefinition. (A protocol constant would have to flip when
+`keyparties` ships; an author choice needs no flag day.)
+
+**A40 — VTC parameters and deviations from the paper.** Ristretto255 for
+ElGamal (already in the dependency tree through Ed25519, prime order, no
+cofactor handling); RSW puzzles over a party-generated 2048-bit RSA modulus
+with a Wesolowski proof of exponentiation for `h = g^(2^T)`; Shamir threshold
+33 of 64 shares, 32 opened by a Fiat–Shamir challenge, soundness
+`1/C(64,32) ≈ 2^−60.7`; no range proofs or homomorphic packing because a single
+honest unopened puzzle already reconstructs the secret together with the 32
+opened shares. Every deviation from Thyagarajan et al. (CCS 2020) is listed in
+SPEC §10.6. Rule 1 carve-out: the VTC is the only construction assembled here
+from primitive crates (big integers, primality tests, RSA key generation,
+Ristretto255, BLAKE3, AEAD).
+
+**A13 — Delay sizing.** `required_delay(blocks) = blocks × 600 × S_MAX_RSA ×
+3/2` with `S_MAX_RSA = 2^26` sequential 2048-bit squarings per second (the
+whitepaper leaves `S_max` open; FPGA results from the 2019–2020 VDF Alliance
+competition were ≈ 25 ns per 1024-bit squaring, so 2^26/s is a conservative
+ASIC bound for 2048-bit). A one-week vote whose parties register one day
+before open needs `T ≈ 7 × 10^13`; a commodity solver at ~10^6 squarings/s
+would need about two years to force open, which is why voluntary publication
+after close is the normal path and forced opening is the deterrent. Hard cap
+`T_MAX = 2^52`. Dev mode allows tiny delays.
+
+**A19 — Ballot payload.** Under `none`, one byte. Under `keyparties`, the
+sorted party list plus two Ristretto points (64 bytes); the ElGamal
+randomness is `scalar_wide(H_B64("rand"; s || vote_id))`, so the payload is
+deterministic and retransmissions are byte-identical as whitepaper §8
+requires. No nonce or AEAD is involved on the ballot itself.
 
 **A20 — Deterministic proofs.** Groth16 proving is randomized; the client
-seeds its RNG from `H_B("proof-rand"; s || …)` and stores the produced bytes, so
-retransmissions are byte-identical as §8 requires.
+seeds its RNG from `H_B("proof-rand"; s || content_id)` and stores the produced
+bytes, so retransmissions are byte-identical as §8 requires.
 
 ## Engineering choices
 

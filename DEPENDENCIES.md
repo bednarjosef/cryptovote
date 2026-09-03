@@ -13,7 +13,6 @@ Versions are pinned in the workspace `Cargo.toml`.
 | `ark-bn254`, `ark-ff`, `ark-ec`, `ark-std`, `ark-serialize` | 0.6.0 | Field/curve arithmetic and canonical serialization for the proof system | Whitepaper allows Groth16; arkworks is the maintained pure-Rust Groth16 ecosystem, compiles to WASM and mobile | Maintained (Apr 2026) |
 | `ark-relations`, `ark-r1cs-std`, `ark-snark`, `ark-groth16` | 0.6.0 | R1CS circuit description, Groth16 prove/verify | Same ecosystem; verification is milliseconds, proving seconds on a phone (whitepaper §4) | Groth16 needs a per-circuit trusted setup (ASSUMPTIONS A24) |
 | `ark-crypto-primitives` | 0.6.0 (`crh`, `merkle_tree`, `sponge`, `constraints`) | Poseidon (native + gadget), Poseidon parameter generation (`find_poseidon_ark_and_mds`, Grain LFSR as in the reference), Merkle path gadget | Poseidon in-circuit per whitepaper §4; native and constraint versions share one parameter set | Maintained (Apr 2026) |
-| `kyn-vdf` | 0.1.1 (exact pin) | Class-group discriminant derivation (Chia `create_discriminant`), form arithmetic (NUDUPL/NUCOMP), Chia BQFC form serialization, Wesolowski verification | The only pure-Rust, WASM-compatible class-group VDF crate. Verifier-only by design, but it exposes `Form::square`, `compose`, `pow`, `get_b`, so *solving* is `T` calls to `square` and the proof is one `pow` with exponent `⌊2^T / B⌋` — composition of crate operations, no arithmetic written here. Test-vector compatible with Chia's reference, so a fast C++/ASM prover (`chiavdf`) can be swapped in for production solving | **Young**: released Aug 2026, single author, 88 downloads. Mitigations: exact pin, Chia vectors, zero unsafe, 1.5 kLoC that can be audited. **Whether the puzzle is used at all depends on BLOCKERS.md #1.** |
 | `chacha20poly1305` | 0.11.0 | `Enc_K` = XChaCha20-Poly1305 | Whitepaper §4 example; RustCrypto, audited | Maintained (Aug 2026) |
 | `ed25519-dalek` | 2.2.0 | Authority, Issuer, node signatures | Standard, audited. 3.0.0 (Jul 2026) exists; 2.x pinned because the rest of the ecosystem (sphinx-packet, arti) still resolves on it; revisit in Phase 7 | Maintained |
 | `x25519-dalek` | 2.x (matching `sphinx-packet`) | Mix hop keys | Required by the Sphinx crate's API | Maintained |
@@ -23,7 +22,27 @@ Versions are pinned in the workspace `Cargo.toml`.
 | `rs_merkle` | 1.5.0 | Anchor Merkle tree and inclusion proofs | Small, generic over the hasher, exact algorithm specified in SPEC §8 | Maintained (Feb 2025) |
 | `rand`, `rand_chacha` | 0.8 / 0.3 | RNG for keys; ChaCha20 for seeded (deterministic) proof randomness | Versions matching arkworks' `rand_core` | Maintained |
 
-## Rejected for the class-group puzzle
+## Key parties (Phase 10, secrecy = keyparties)
+
+| Crate | Version | Used for | Why this one | Status |
+|---|---|---|---|---|
+| `curve25519-dalek` | 5.0.0 | Ristretto255 points and scalars for exponent ElGamal, share commitments, Lagrange interpolation | Already in the tree via `ed25519-dalek`; prime-order group; audited | Maintained (Jul 2026) |
+| `num-bigint`, `num-integer`, `num-traits` | 0.5 / 0.1 / 0.2 | 2048-bit modular arithmetic for RSW puzzles, the proof of exponentiation, and sequential squaring | The standard pure-Rust big integer crate; compiles to WASM | Maintained (Jul–Aug 2026) |
+| `crypto-primes` (with `crypto-bigint`) | 0.7.2 | Generating the party's 1024-bit primes; Miller–Rabin for `hash_to_prime` | Maintained by Entropy; used by `rsa` 0.10 and `class-groups`; constant-time | Maintained (Jun 2026) |
+| `rsa` | 0.9.10 | Alternative for modulus generation (`RsaPrivateKey::new` and `.primes()`) if `crypto-primes` integration proves awkward | RustCrypto, audited | Maintained (Apr 2026) |
+| `chacha20poly1305` | 0.11.0 | AEAD of puzzle shares | Already used | — |
+
+The VTC construction itself (SPEC §10) is assembled from these crates under
+the explicit Rule 1 carve-out; nothing lower-level than a group operation or
+a modular exponentiation is written here.
+
+## No longer needed
+
+| Crate | Reason |
+|---|---|
+| `kyn-vdf` 0.1.1 | The class-group time-lock puzzle was dropped with whitepaper §7 (BLOCKERS.md #1). Removed from the workspace so a one-month-old single-author crate is not in the trust base. |
+
+## Rejected for the class-group puzzle (historical)
 
 | Crate | Reason |
 |---|---|
@@ -33,7 +52,7 @@ Versions are pinned in the workspace `Cargo.toml`.
 | `class-groups` 0.0.2-alpha | Constant-time class-group arithmetic (crypto-bigint), no VDF/Wesolowski; alpha |
 | `bicycl-rs` 0.2.5 | Bindings to the BICYCL C++ library; no WASM |
 
-## Candidates for BLOCKERS.md #1 (not yet added)
+## Considered for BLOCKERS.md #1 and not chosen
 
 | Crate | Version | Notes |
 |---|---|---|
@@ -57,7 +76,7 @@ Versions are pinned in the workspace `Cargo.toml`.
 
 ## Toolchain
 
-Rust 1.94 (edition 2024, `rust-version = 1.85` required by `kyn-vdf`).
+Rust 1.94 (edition 2024, `rust-version = 1.85`).
 No `nargo`/`circom` toolchain is needed: the circuit is written as arkworks
 R1CS (whitepaper §15 lists Noir/Circom as examples; Groth16 over an R1CS
 description is the same class of construction and keeps the build inside

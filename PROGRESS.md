@@ -31,3 +31,28 @@ Tests: skeleton only (`cargo test --workspace` passes trivially).
 Next: Phase 1 — types, canonical encoding, round-trip tests and the vectors of
 SPEC §17, after the BLOCKER #1 decision (Phase 1 does not depend on it, but
 the `Solution` and `Ballot` ciphertext types do).
+
+## Phase 0 amendment — secrecy design  (2026-09-03)
+
+Protocol author confirmed whitepaper §7 is wrong and chose **key parties**
+(BLOCKERS.md #1, resolved). Changes:
+
+- `SPEC.md`: per-vote `secrecy` field (`none` | `keyparties`) in
+  VoteDefinition and Initiative; `puzzle_T`, the `Solution` item and the
+  puzzle tags removed; new items `KeyParty` (0x06) and `Share` (0x09); §10
+  specifies the verifiable timed commitment (RSW puzzles over a party
+  modulus, Wesolowski proof of exponentiation, Shamir 33-of-64, cut-and-choose
+  with 32 openings, soundness 2^−60.7) with every deviation from Thyagarajan
+  et al. (CCS 2020) tabulated; §11 specifies exponent ElGamal on Ristretto255
+  with ballots declaring their party set; §12 counting rule covers both modes.
+  "item id" renamed "content id"; duplicate rule text is now "same nullifier,
+  same content id" vs "same nullifier, different content id".
+- `ASSUMPTIONS.md`: A35–A40 (secrecy semantics, honest-party assumption,
+  Sybil liveness cost, ballot-declared party sets, initiative secrecy,
+  VTC parameters); A13/A19/A6 rewritten.
+- `DEPENDENCIES.md`: `kyn-vdf` removed from the workspace; Phase 10 crates
+  listed (`curve25519-dalek`, `num-bigint`, `crypto-primes`/`rsa`).
+- Vectors 17.2, 17.3, 17.5 regenerated for the new VoteDefinition layout.
+
+Implementation order: Phases 1–9 under `secrecy = none`, then Phase 10
+(`keyparties`).

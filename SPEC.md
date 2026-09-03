@@ -1,37 +1,47 @@
 # CryptoVote protocol specification — byte-exact formats and rules
 
-Status: **Phase 0 draft, v1 wire format.** This document is the normative
-companion to `whitepaper.md` (v0.2). Where the whitepaper is silent or
-ambiguous, the choice made here is listed in `ASSUMPTIONS.md`. Where the
-whitepaper cannot be implemented as written, the section is marked
-**BLOCKED** and the analysis is in `BLOCKERS.md`.
+Status: **Phase 0 amended (secrecy design), v1 wire format.** This document is
+the normative companion to `whitepaper.md` (v0.2). Where the whitepaper is
+silent or ambiguous, the choice made here is listed in `ASSUMPTIONS.md`.
+Whitepaper §7 (puzzle-derived shared key) is superseded by §10–§11 of this
+document ("key parties"); see `BLOCKERS.md #1` for the reason.
 
 Every implementer (Rust reference, independent verifiers in other languages)
 must produce byte-identical outputs for the vectors in §17.
 
 Notation: `||` is byte concatenation; `[N]` is a fixed N-byte array; `Fr` is
-the BN254 scalar field (§1.2); all integers are little-endian.
+the BN254 scalar field (§1.2); `Zℓ` is the Ristretto255 scalar field (§1.7);
+integers are little-endian unless stated; big integers in RSA groups are
+big-endian fixed-width (§1.8).
+
+Implementation status: `secrecy = none` is implemented first (Phases 1–9);
+`secrecy = keyparties` (§10–§11, items 0x06 and 0x09) is implemented in
+Phase 10.
 
 ---
 
 ## 1. Primitive instantiation
 
-The whitepaper's abstract primitives (§4) are instantiated as follows. None of
-them is implemented in this repository; see `DEPENDENCIES.md`.
+The whitepaper's abstract primitives (§4) are instantiated as follows. The
+only construction assembled in this repository from lower-level crates is the
+verifiable timed commitment of §10 (an explicitly granted carve-out from Hard
+rule 1); every primitive it uses (big-integer arithmetic, primality testing,
+RSA key generation, Ristretto255, BLAKE3, AEAD) comes from a crate.
 
 | Whitepaper primitive | Instantiation | Crate |
 |---|---|---|
-| `H` outside circuits | BLAKE3-256 (plain hash and `derive_key` mode) | `blake3` |
+| `H` outside circuits | BLAKE3-256 (plain hash, `derive_key`, `derive_key` XOF) | `blake3` |
 | `H` inside circuits | Poseidon over BN254 `Fr`, width 3, `α = 5`, 8 full + 57 partial rounds | `ark-crypto-primitives` |
 | Merkle tree (Registry) | Sparse binary tree, depth 32, Poseidon 2-to-1 | `ark-crypto-primitives` |
 | Membership proof | Groth16 over BN254, R1CS statement of §5 | `ark-groth16` |
-| Time-lock puzzle | Imaginary-quadratic class group, 1024-bit discriminant, Chia-compatible forms and Wesolowski proof | `kyn-vdf` — **see BLOCKERS.md #1** |
-| `Enc_K` | XChaCha20-Poly1305 | `chacha20poly1305` |
+| Ballot encryption (keyparties) | Exponent EC-ElGamal on Ristretto255 under the aggregate key of the vote's key parties | `curve25519-dalek` |
+| Timed release of key shares | Verifiable timed commitment: RSW time-lock puzzles over a party-generated 2048-bit RSA modulus, Shamir sharing, cut-and-choose (Thyagarajan et al., CCS 2020) | `num-bigint`, `crypto-primes`/`rsa`, `chacha20poly1305` |
+| `Enc_K` (puzzle shares) | XChaCha20-Poly1305 | `chacha20poly1305` |
 | Onion encryption | Sphinx (Nym packet format, X25519) | `sphinx-packet` |
 | Bitcoin SPV | Block headers, PoW check, partial Merkle tree | `bitcoin` |
 | OTS proof | OpenTimestamps timestamp ops | `opentimestamps` |
 | Signatures (authority, issuer, nodes) | Ed25519 | `ed25519-dalek` |
-| Merkle tree (anchors) | Binary tree over sorted item ids, BLAKE3 (§8) | `rs_merkle` |
+| Merkle tree (anchors) | Binary tree over sorted content ids, BLAKE3 (§8) | `rs_merkle` |
 
 ### 1.1 BLAKE3
 
@@ -39,12 +49,14 @@ them is implemented in this repository; see `DEPENDENCIES.md`.
 `H_B(tag; data)` is BLAKE3 in key-derivation mode:
 
 ```
-H_B(tag; data) = blake3::derive_key(context = "cryptovote/v1/" || tag, key_material = data)
+H_B(tag; data)   = blake3::derive_key(context = "cryptovote/v1/" || tag, key_material = data)   (32 bytes)
+H_B64(tag; data) = the first 64 bytes of the same derive_key XOF output
 ```
 
-`derive_key` is a standard BLAKE3 mode available in every BLAKE3 library.
+`derive_key` and its extendable output are standard BLAKE3 modes available in
+every BLAKE3 library; `H_B` is the 32-byte prefix of `H_B64`.
 
-### 1.2 Field elements
+### 1.2 Field elements (BN254)
 
 `Fr` is the scalar field of BN254 with modulus
 
@@ -85,7 +97,7 @@ to run with the development key (§14).
 ### 1.5 XChaCha20-Poly1305
 
 `aead_seal(K: [32], nonce: [24], ad, pt) -> ct || tag(16)` and `aead_open` as
-in RFC-draft XChaCha20-Poly1305 (`chacha20poly1305::XChaCha20Poly1305`).
+in XChaCha20-Poly1305 (`chacha20poly1305::XChaCha20Poly1305`).
 
 ### 1.6 Ed25519
 
@@ -96,18 +108,26 @@ Every signature in this protocol is over a **domain-prefixed message**:
 |---|---|
 | VoteDefinition (authority) | `"cryptovote/v1/sig/vote" || vote_id` |
 | Registry root (issuer) | `"cryptovote/v1/sig/registry" || epoch(u64) || leaf_count(u64) || root(Fr)` |
-| Witness (node) | `"cryptovote/v1/sig/witness" || item_id || vote_id` |
+| Witness (node) | `"cryptovote/v1/sig/witness" || content_id || vote_id` |
 | Node transport (mix, gossip) | `"cryptovote/v1/sig/transport" || …` (Phase 7) |
 
-### 1.7 Class group (kyn-vdf, Chia-compatible)
+### 1.7 Ristretto255
 
-Discriminant: `D = create_discriminant(seed, 1024)` (Chia `create_discriminant`
-as implemented by `kyn_vdf::create_discriminant`). Forms are serialized in the
-Chia BQFC format, `serialize_form(f, 1024)`, **100 bytes**. Wesolowski proofs
-use the 264-bit Fiat–Shamir prime `B = hash_prime(ser(x) || ser(y))` and the
-check `π^B · x^r = y`, `r = 2^T mod B` (`kyn_vdf::verify_wesolowski`).
+Group `G` = ristretto255 (`curve25519-dalek`), prime order
+`ℓ = 2^252 + 27742317777372353535851937790883648493`, base point `G`
+(`RISTRETTO_BASEPOINT_POINT`). Points are serialized as their 32-byte
+canonical Ristretto encoding; a non-canonical encoding is invalid. Scalars
+(`Zℓ`) are 32 bytes little-endian, canonical (`< ℓ`).
+`scalar_wide(b: [64]) = int_le(b) mod ℓ` (`Scalar::from_bytes_mod_order_wide`).
 
-### 1.8 Bitcoin
+### 1.8 RSA group (timed commitments)
+
+A party's modulus `N` is a 2048-bit integer (product of two 1024-bit primes
+generated by the party); elements of `Z*_N` are serialized as **256-byte
+big-endian** fixed-width integers (`bigint256`). Squaring-based delay:
+`y = x^(2^T) mod N` by `T` sequential squarings.
+
+### 1.9 Bitcoin
 
 Block headers are 80-byte consensus-encoded headers. `blockhash(h)` is the
 32-byte hash of the header at height `h` in internal byte order
@@ -119,7 +139,8 @@ Block headers are 80-byte consensus-encoded headers. `blockhash(h)` is the
 
 Every Log item has exactly one byte representation. Encoders must produce it;
 decoders must reject anything else (trailing bytes, non-canonical lengths,
-invalid UTF-8, unsorted lists where sorting is required, non-canonical `Fr`).
+invalid UTF-8, unsorted lists where sorting is required, non-canonical `Fr`,
+non-canonical points or scalars).
 
 | Type | Encoding |
 |---|---|
@@ -127,6 +148,8 @@ invalid UTF-8, unsorted lists where sorting is required, non-canonical `Fr`).
 | `u32`, `u64` | 4 / 8 bytes little-endian |
 | `[N]` | N raw bytes |
 | `Fr` | 32 bytes LE, canonical (§1.2) |
+| `Point`, `Zℓ` | 32 bytes, canonical (§1.7) |
+| `bigint256` | 256 bytes big-endian (§1.8) |
 | `bytes` | `u32` length `||` raw bytes |
 | `string` | `bytes` holding valid UTF-8; no BOM; no normalization; length ≤ 65 536 |
 | `list<T>` | `u32` count `||` elements in order |
@@ -146,17 +169,18 @@ Item := version(u8 = 0x01) || item_type(u8) || body
 | 0x03 | Support |
 | 0x04 | Ballot |
 | 0x05 | Anchor |
-| 0x06 | Solution |
+| 0x06 | KeyParty (secrecy = keyparties) |
 | 0x07 | NodeRegistration |
 | 0x08 | Witness |
+| 0x09 | Share (secrecy = keyparties) |
 
 `item_hash(item) = blake3(Item bytes)` identifies exact bytes (used for gossip
 have/want and dedup of retransmissions).
 
-`item_id(item)` identifies the item's **content without its proof or
-signature** (defined per item in §6). Nullifier duplicate rules and anchor
-leaves use `item_id`, never `item_hash`, because Groth16 proofs can be
-re-randomized by anyone (see `ASSUMPTIONS.md` A3).
+`content_id(item)` identifies the item's **content without its proof or
+signature** (defined per item in §6). Nullifier duplicate rules, anchor leaves
+and every cross-reference between items use `content_id`, never `item_hash`,
+because Groth16 proofs can be re-randomized by anyone (`ASSUMPTIONS.md` A3).
 
 Size limit: an encoded item is at most 8 MiB (`MAX_ITEM_BYTES`); larger items
 are invalid.
@@ -175,6 +199,7 @@ A tag is mapped to `Fr` as the little-endian integer of its ASCII bytes:
 | `"support"` | `737570706f7274` | 32776920251790707 |
 | `"author"` | `617574686f72` | 125822819399009 |
 | `"node"` | `6e6f6465` | 1701080942 |
+| `"keyparty"` | `6b65797061727479` | 8751745738712114539 |
 
 All nullifier-like values are computed with one fixed-arity function:
 
@@ -188,6 +213,7 @@ nullifier(s, tag, id) = poseidon(s, tag_field(tag), id_field)
 | support nullifier `n` | `"support"` | `fr_mod(initiative_id)` |
 | author pseudonym `P` | `"author"` | `0` |
 | node nullifier `n` | `"node"` | `0` |
+| key-party nullifier `n` | `"keyparty"` | `fr_mod(vote_id)` |
 
 Identity commitment: `C = poseidon(s)` (arity 1).
 
@@ -195,13 +221,13 @@ Identity commitment: `C = poseidon(s)` (arity 1).
 
 | Value | Definition |
 |---|---|
-| deterministic ballot randomness | `r = H_B("rand"; s_bytes || vote_id)` |
-| deterministic proof randomness (client only) | `H_B("proof-rand"; s_bytes || item_id_preimage_hash)` |
-| discriminant seed | `H_B("discriminant"; vote_id || blockhash(open_block))` |
-| generator seed | `H_B("generator"; vote_id)` |
-| receipt code | `H_B("receipt"; n || c)` |
-| ballot key | `K = blake3(y_bytes)` (no tag; whitepaper `K = H(y)`) |
-| item ids | `blake3(…)` over the preimages in §6 |
+| deterministic ballot randomness (keyparties) | `r = scalar_wide(H_B64("rand"; s_bytes || vote_id))` |
+| deterministic proof randomness (client only) | seed `= H_B("proof-rand"; s_bytes || content_id)` |
+| VTC cut-and-choose challenge | `H_B64("vtc-challenge"; …)` XOF, §10.3 |
+| VTC puzzle key | `blake3(bigint256(y))`, §10.2 |
+| VTC proof-of-exponentiation prime | `hash_to_prime(H_B("vtc-poe"; …))`, §10.2 |
+| receipt code | `H_B("receipt"; n || payload)` |
+| content ids | `blake3(…)` over the preimages in §6 |
 
 `s_bytes` is the 32-byte LE encoding of `s ∈ Fr`.
 
@@ -256,7 +282,7 @@ index snapshots by root.
 
 ## 5. Membership statement and proof
 
-One circuit serves all four proof-bearing items.
+One circuit serves all five proof-bearing items.
 
 **Public inputs** (in this order, each an `Fr`):
 
@@ -264,15 +290,15 @@ One circuit serves all four proof-bearing items.
 2. `nullifier` — `n` or `P`
 3. `tag` — `tag_field` of §3.1
 4. `id` — `id_field` of §3.1
-5. `signal` — `fr_mod(item_id)` of the containing item (§6)
+5. `signal` — `fr_mod(content_id)` of the containing item (§6)
 
 **Private inputs:** `s`, `siblings[32]`, `index_bits[32]`.
 
 **Constraints:**
 
 ```
-leaf     = poseidon(s)
-root     = merkle_root(leaf, siblings, index_bits)     (32 levels, §4.2 rule)
+leaf      = poseidon(s)
+root      = merkle_root(leaf, siblings, index_bits)     (32 levels, §4.2 rule)
 nullifier = poseidon(s, tag, id)
 signal * signal = signal_sq                              (binds signal; result unused)
 ```
@@ -290,7 +316,7 @@ is `ark_groth16::Groth16::<Bn254>::verify_proof`.
 
 ## 6. Log items
 
-For each item: the body layout, the `item_id` preimage, and the validity
+For each item: the body layout, the `content_id` preimage, and the validity
 checklist. "Intrinsic" checks need only the item and its referenced objects;
 "timing" checks need anchors and are applied by the counting rule (§12), not
 at admission. An item that fails any intrinsic check is invalid, dropped, and
@@ -308,7 +334,7 @@ body := question(string)
      || open_block(u32)
      || close_block(u32)
      || min_ballots(u32)
-     || puzzle_T(u64)
+     || secrecy(u8)                  -- 0x00 none | 0x01 keyparties
      || origin(enum)
 origin := 0x00 || authority_key([32]) || signature([64])       (Authority)
         | 0x01 || initiative_id([32])                          (Initiative)
@@ -317,16 +343,19 @@ origin := 0x00 || authority_key([32]) || signature([64])       (Authority)
 `unsigned_body` = the item bytes up to but excluding `signature` (for
 Authority) or the whole item (for Initiative).
 
-`vote_id = item_id = blake3(unsigned_body)`.
+`vote_id = content_id = blake3(unsigned_body)`.
 
 Validity:
 
 - [ ] `2 ≤ options.len() ≤ MAX_OPTIONS (64)`; every option non-empty and pairwise distinct; `question` non-empty.
 - [ ] `open_block < close_block`, `close_block − open_block ≤ MAX_VOTE_BLOCKS (52 560)`.
+- [ ] `secrecy ∈ {0x00, 0x01}`.
 - [ ] `registry_root` is the root of a known, Issuer-signed Registry snapshot (referenced object).
-- [ ] `puzzle_T == puzzle_t(open_block, close_block)` (§10), or in dev mode `puzzle_T == DEV_PUZZLE_T`.
 - [ ] Authority origin: `authority_key ∈ AUTHORITY_KEYS` (deployment constant, TRUST: authority for *creating* votes only); Ed25519 verifies over the vote message (§1.6).
 - [ ] Initiative origin: the referenced Initiative exists and is valid, and the item bytes equal `canonical(derive_vote(initiative))` of §13 evaluated on the node's current view. If the threshold is not yet reached the item is held in the orphan pool (§7.2), not rejected.
+
+Under `secrecy = none` the running count is public by design: every ballot
+carries its option index in the clear.
 
 ### 6.2 Initiative (0x02)
 
@@ -335,14 +364,15 @@ body := text(string)
      || registry_root(Fr)
      || threshold_N(u32)
      || support_deadline_block(u32)
+     || secrecy(u8)                -- secrecy of the vote derived from this initiative
      || author(Fr)                 -- P
      || proof([128])
-initiative_id = item_id = blake3(item bytes without the trailing proof)
+initiative_id = content_id = blake3(item bytes without the trailing proof)
 ```
 
 Validity:
 
-- [ ] `text` non-empty.
+- [ ] `text` non-empty; `secrecy ∈ {0x00, 0x01}`.
 - [ ] `registry_root` known (as 6.1).
 - [ ] `threshold_N == initiative_threshold(registry_size(registry_root))` (§14).
 - [ ] `proof` verifies with public inputs `[registry_root, author, tag("author"), 0, fr_mod(initiative_id)]`.
@@ -353,7 +383,7 @@ Validity:
 
 ```
 body := initiative_id([32]) || nullifier(Fr) || proof([128])
-support_id = item_id = blake3(item bytes without the trailing proof)
+support_id = content_id = blake3(item bytes without the trailing proof)
 ```
 
 Validity:
@@ -366,39 +396,42 @@ Validity:
 ### 6.4 Ballot (0x04)
 
 ```
-body := vote_id([32]) || nullifier(Fr) || ciphertext(bytes) || proof([128])
-ballot_id = item_id = blake3(item bytes without the trailing proof)
-ciphertext := nonce([24]) || aead_seal(K, nonce, ad = vote_id || nullifier, plaintext = option_index(u8))
-            (24 + 1 + 16 = 41 bytes)
+body := vote_id([32]) || nullifier(Fr) || payload(bytes) || proof([128])
+ballot_id = content_id = blake3(item bytes without the trailing proof)
+
+payload (secrecy = none)      := option_index(u8)                              (1 byte)
+payload (secrecy = keyparties) := party_ids(list<[32]>) || c1(Point) || c2(Point)
+                                  party_ids: sorted ascending, unique, ≤ MAX_KEY_PARTIES (32)
+                                  (c1, c2) = ElGamal ciphertext of §11
 ```
 
-Construction (whitepaper §8, client side):
+Construction (client side):
 
 ```
-n      = nullifier(s, "ballot", fr_mod(vote_id))
-r      = H_B("rand"; s_bytes || vote_id)
-nonce  = r[0..24]
-c      = nonce || aead_seal(K, nonce, vote_id || n, [option_index])
-ballot_id = blake3(0x01 || 0x04 || vote_id || n || enc(c))
-π      = prove([vote.registry_root, n, tag("ballot"), fr_mod(vote_id), fr_mod(ballot_id)]; s, path)
+n         = nullifier(s, "ballot", fr_mod(vote_id))
+payload   = [option_index]                                     (none)
+          = enc(party_ids) || c1 || c2   with (c1, c2) from §11  (keyparties)
+ballot_id = blake3(0x01 || 0x04 || vote_id || n || enc(payload))
+π         = prove([vote.registry_root, n, tag("ballot"), fr_mod(vote_id), fr_mod(ballot_id)]; s, path)
 ```
 
 The device stores the exact bytes and retransmits them unchanged; the proof
-RNG is seeded from `H_B("proof-rand"; …)` so a re-derivation on the same device
-is also byte-identical.
+RNG is seeded from `H_B("proof-rand"; s_bytes || ballot_id)` so a re-derivation
+on the same device is also byte-identical. Under `keyparties` the ElGamal
+randomness is derived from `s` and `vote_id` (§11), so the payload itself is
+deterministic as well.
 
 Validity (intrinsic):
 
 - [ ] Referenced VoteDefinition exists and is valid (else orphan pool).
-- [ ] `ciphertext.len() == 41`.
+- [ ] `secrecy = none`: `payload.len() == 1` and `payload[0] < options.len()`.
+- [ ] `secrecy = keyparties`: `payload` parses as above; every id in `party_ids` is the `content_id` of a valid KeyParty item for this `vote_id` (else orphan pool); `c1`, `c2` canonical points.
 - [ ] `proof` verifies with `[vote.registry_root, nullifier, tag("ballot"), fr_mod(vote_id), fr_mod(ballot_id)]`.
 
 Counted iff, additionally (§12): anchored at height ≤ `close_block` (or
-witnessed, in fallback), unique nullifier among timely ballots, decrypts under
-`K` to `option_index < options.len()`.
-
-**K derivation is BLOCKED — see BLOCKERS.md #1.** Everything above is
-independent of how `K` is obtained.
+witnessed, in fallback); unique nullifier among timely ballots; and, under
+`keyparties`, every declared party was anchored before `open_block` and the
+ballot decrypts to a valid option index.
 
 ### 6.5 Anchor (0x05)
 
@@ -407,13 +440,12 @@ body  := leaves(list<[32]>) || proof(enum)
 proof := 0x00 || height(u32) || ots(bytes)                                   (OpenTimestamps)
        | 0x01 || height(u32) || raw_tx(bytes) || partial_merkle_tree(bytes)  (Direct)
        | 0xFF || height(u32)                                                 (Dev mock — dev mode only)
-anchor_id = item_id = blake3(item bytes)        (no proof stripping: anchors have no nullifier)
+anchor_id = content_id = blake3(item bytes)        (no proof stripping: anchors have no nullifier)
 ```
 
-`leaves` are `item_id`s (of any item type; only Ballot and Support ids matter
-for counting), **strictly ascending** by byte order, no duplicates,
-`1 ≤ len ≤ MAX_ANCHOR_LEAVES (1 000 000)`. `root = anchor_root(leaves)` (§8) is
-not stored; it is recomputed.
+`leaves` are `content_id`s (of any item type), **strictly ascending** by byte
+order, no duplicates, `1 ≤ len ≤ MAX_ANCHOR_LEAVES (1 000 000)`.
+`root = anchor_root(leaves)` (§8) is not stored; it is recomputed.
 
 Validity:
 
@@ -425,17 +457,38 @@ Validity:
 
 Anchors never invalidate or validate ballots; they only give them a height.
 
-### 6.6 Solution (0x06)  — **BLOCKED (BLOCKERS.md #1); class-group form given for reference**
+### 6.6 KeyParty (0x06) — secrecy = keyparties, Phase 10
+
+A person registers as a key party for one vote by publishing an ElGamal
+public key and a verifiable timed commitment (VTC, §10) to its secret key.
 
 ```
-body := vote_id([32]) || y([100]) || proof([100])
-solution_id = item_id = blake3(0x01 || 0x06 || vote_id || y)
+body := vote_id([32])
+     || pk(Point)                       -- pk = sk · G
+     || modulus(bigint256)              -- N, party-generated (§10.1)
+     || g(bigint256)
+     || h(bigint256)                    -- h = g^(2^T) mod N
+     || poe(bigint256)                  -- Wesolowski proof of exponentiation for h (§10.2)
+     || delay_T(u64)                    -- T sequential squarings
+     || share_commitments(list<Point>)  -- exactly VTC_N (64): h_j = share_j · G, j = 1..64
+     || puzzles(list<Puzzle>)           -- exactly VTC_N; Puzzle := u(bigint256) || ct([48])
+     || openings(list<Opening>)         -- exactly VTC_OPEN (32), for the challenge set I in ascending index order;
+                                        --   Opening := share(Zℓ) || r(bigint256)
+     || registry_root(Fr)
+     || nullifier(Fr)
+     || proof([128])
+keyparty_id = content_id = blake3(item bytes without the trailing proof)
 ```
 
-Validity: referenced vote exists and is valid; `D, g` derived per §10;
-`y`, `proof` deserialize as forms of discriminant `D`;
-`verify_wesolowski(D, g, y, proof, puzzle_T) == true`. All valid Solutions
-for a vote carry the same `y` (function soundness), so one is kept.
+Validity:
+
+- [ ] Referenced VoteDefinition exists, is valid, and has `secrecy = keyparties`.
+- [ ] `registry_root == vote.registry_root`.
+- [ ] `delay_T ≤ T_MAX`; `modulus` is odd, `2^2047 < N < 2^2048`; `g, h, poe ∈ [2, N−1]`.
+- [ ] VTC verification of §10.3 passes (proof of exponentiation, challenge set, openings, Lagrange consistency).
+- [ ] `proof` verifies with `[registry_root, nullifier, tag("keyparty"), fr_mod(vote_id), fr_mod(keyparty_id)]`.
+- Duplicates: §7.1 on `nullifier` — one key party per person per vote; a differing duplicate removes both from **client selection** (§11.1) but does not affect decryption of ballots that already declared them (A38).
+- Timing (client selection and §12): anchored at height `h_a < open_block`, and `delay_T ≥ required_delay(close_block − h_a)` (§10.4).
 
 ### 6.7 NodeRegistration (0x07)
 
@@ -449,7 +502,7 @@ body := node_key([32])        -- Ed25519 (witness signatures, transport)
      || registry_root(Fr)
      || nullifier(Fr)
      || proof([128])
-registration_id = item_id = blake3(item bytes without the trailing proof)
+registration_id = content_id = blake3(item bytes without the trailing proof)
 ```
 
 Validity: `registry_root` known; `endpoint` ≤ 256 bytes; `proof` verifies
@@ -459,18 +512,30 @@ duplicate invalidates all of that person's registrations, A10).
 `operator/country/asn` are used only for hop diversity (privacy), never for
 correctness — `// TRUST: node operator for self-declared diversity attributes (§12)`.
 
-### 6.8 Witness (0x08)  — carrier for whitepaper §9 fallback
+### 6.8 Witness (0x08) — carrier for whitepaper §9 fallback
 
 ```
-body := item_id([32]) || vote_id([32]) || node_key([32]) || signature([64])
+body := content_id([32]) || vote_id([32]) || node_key([32]) || signature([64])
 witness_id = blake3(item bytes without the trailing signature)
 ```
 
 Validity: `node_key` belongs to a valid, non-duplicated NodeRegistration;
 Ed25519 verifies over the witness message (§1.6); the referenced vote exists.
-Semantics: the node attests it held `item_id` before the vote's `close_block`.
-Used **only** when no anchor exists for the vote (§12); results computed from
-witnesses are labelled `FALLBACK`.
+Semantics: the node attests it held the item `content_id` before the vote's
+`close_block`. Used **only** when no anchor exists for the vote (§12); results
+computed from witnesses are labelled `FALLBACK`.
+
+### 6.9 Share (0x09) — secrecy = keyparties, Phase 10
+
+```
+body := vote_id([32]) || keyparty_id([32]) || sk(Zℓ)
+share_id = content_id = blake3(item bytes)
+```
+
+Validity: the referenced KeyParty exists and is valid (else orphan pool);
+`sk · G == keyparty.pk`. Anyone may publish a Share: the party itself after
+`close_block`, or any solver who force-opened the commitment (§10.5). No
+proof is needed because correctness is checked against `pk` directly.
 
 ---
 
@@ -478,32 +543,34 @@ witnesses are labelled `FALLBACK`.
 
 ### 7.1 Duplicates (whitepaper §6)
 
-For items with a nullifier (Support, Ballot, NodeRegistration), among the
-items considered by a given rule (for counting: the *timely* items of one
-vote/initiative; for node registrations: all valid ones):
+For items with a nullifier (Support, Ballot, NodeRegistration, KeyParty),
+among the items considered by a given rule (for counting: the *timely* items
+of one vote/initiative; for node registrations and key-party selection: all
+valid ones):
 
-- same `nullifier`, same `item_id` → retransmission (possibly with a different,
-  re-randomized proof); keep one.
-- same `nullifier`, different `item_id` → double action; **every** item with
-  that nullifier is excluded.
+- **same nullifier, same content id** → retransmission (possibly with a
+  different, re-randomized proof); keep one.
+- **same nullifier, different content id** → double action; **every** item
+  with that nullifier is excluded.
 
 Untimely items (not anchored before the deadline) cannot invalidate timely ones
 (A4). Author pseudonyms are exempt (A9).
 
 ### 7.2 Orphans
 
-An item whose referenced object (VoteDefinition, Initiative, Registry
-snapshot, block header, NodeRegistration) is unknown is held in a bounded
-orphan pool (`MAX_ORPHANS`, FIFO eviction), not relayed, and re-validated when
-the reference arrives. Nodes request missing references from peers by id.
+An item whose referenced object (VoteDefinition, Initiative, KeyParty,
+Registry snapshot, block header, NodeRegistration) is unknown is held in a
+bounded orphan pool (`MAX_ORPHANS`, FIFO eviction), not relayed, and
+re-validated when the reference arrives. Nodes request missing references
+from peers by content id.
 
 ### 7.3 Pruning
 
 After a vote's result has been verified and archived (recorded with its
 `vote_id`, guarantee level, counts, and the ids of the anchors used), a
-non-archival node may delete the vote's Ballots and Solutions. Anchors,
-VoteDefinitions, Initiatives, Supports (until their deadline passes and any
-derived vote is archived), NodeRegistrations and Witnesses are kept.
+non-archival node may delete the vote's Ballots, KeyParties and Shares.
+Anchors, VoteDefinitions, Initiatives, Supports (until their deadline passes
+and any derived vote is archived), NodeRegistrations and Witnesses are kept.
 
 ---
 
@@ -514,11 +581,11 @@ leaf_hash(id)   = blake3(0x00 || id)
 node(l, r)      = blake3(0x01 || l || r)
 ```
 
-Given `leaves` (sorted, unique ids), build level 0 as `leaf_hash` of each
-leaf in order. At each level, pair consecutive nodes `(l, r)` into `node(l, r)`;
-a trailing node without a partner is carried up **unchanged**. The root of a
-single leaf is its `leaf_hash`. (This is `rs_merkle` with a hasher whose
-`concat_and_hash(l, None) = l`.)
+Given `leaves` (sorted, unique content ids), build level 0 as `leaf_hash` of
+each leaf in order. At each level, pair consecutive nodes `(l, r)` into
+`node(l, r)`; a trailing node without a partner is carried up **unchanged**.
+The root of a single leaf is its `leaf_hash`. (This is `rs_merkle` with a
+hasher whose `concat_and_hash(l, None) = l`.)
 
 Inclusion proof for leaf index `i` (served on request, not a Log item):
 `AnchorProof := root([32]) || leaf_count(u32) || index(u32) || siblings(list<[32]>)`
@@ -539,7 +606,7 @@ verified by the same rule.
   is verified by PoW and chain linkage.
 - A header is *usable* once it has `MIN_CONFIRMATIONS = 6` descendants in the
   node's chain. The verifier CLI takes the header file as given (its user
-  chooses the chain).
+  chooses the chain). `tip_height` is the height of the last usable header.
 - OTS: `ots` bytes are the serialized `Timestamp` (not the detached-file
   wrapper) whose initial digest is the anchor root. Ops are executed with
   `opentimestamps::op::Op::execute`; attestations of type
@@ -550,62 +617,178 @@ verified by the same rule.
 
 ---
 
-## 10. Puzzle parameters (whitepaper §7) — **BLOCKED (BLOCKERS.md #1)**
+## 10. Key parties and verifiable timed commitments (secrecy = keyparties)
 
-The derivation below is the whitepaper's, made concrete. It is fully
-implementable for *solving and verifying*; it is the *encryption* side that is
-blocked. If BLOCKER #1 is resolved in favour of a different timed-key
-mechanism, this section is replaced and the tags `discriminant`/`generator`
-become unused.
+Replaces whitepaper §7's shared puzzle key. Each key party `i` holds an
+ElGamal secret `sk_i ∈ Zℓ`, publishes `pk_i = sk_i · G`, and commits to
+`sk_i` in a way that (a) anyone can verify opens to the discrete log of
+`pk_i`, and (b) anyone can force open after `T_i` sequential squarings. The
+construction follows Thyagarajan, Bhat, Malavolta, Döttling, Kate, Schröder,
+"Verifiable Timed Signatures Made Practical" (CCS 2020, ePrint 2020/1563),
+Figure 2, adapted to a discrete-log secret; deviations are listed in §10.6.
+
+### 10.1 Party parameters
 
 ```
-puzzle_t(open, close) = (close − open) × 600 × S_MAX × 3 / 2
-                        S_MAX = 2^20 squarings per second, M = 1.5
-                        (1008 blocks → 951 268 147 200 ≈ 2^39.8)
-DEV_PUZZLE_T          = 1024                      (dev mode only)
-
-seed_D = H_B("discriminant"; vote_id || blockhash(open_block))
-D      = create_discriminant(seed_D, 1024)
-g_0    = Form::generator(D)                       (Chia principal form (2, 1, c))
-e      = 1 + int_le(H_B("generator"; vote_id))
-g      = g_0 ^ e                                  (class-group exponentiation)
-y      = g ^ (2^T)                                (T sequential squarings)
-y_bytes = serialize_form(y, 1024)                 (100 bytes)
-K      = blake3(y_bytes)
+p, q      : random 1024-bit primes (crate-generated); N = p·q; φ = (p−1)(q−1)
+g         : x^2 mod N for random x ∈ [2, N−1]               (a quadratic residue)
+T         : delay_T, chosen by the party (§10.4)
+h         : g^(2^T) mod N, computed as g^(2^T mod φ)          (fast with the trapdoor)
 ```
 
-`blockhash(open_block)` is included in the discriminant seed so that nobody
-can start the sequential computation before the vote opens (A2). Consequently
-`D` is only known once `open_block` exists, and a ballot can only be created
-after that.
+The party keeps `φ` secret and may discard it after commitment. A weak or
+malformed modulus only weakens that party's own share
+(`// TRUST: nobody — a party can only hurt its own share`).
+
+### 10.2 Building blocks
+
+**Proof of exponentiation** (Wesolowski, in `Z*_N`), proving `h = g^(2^T)`:
+
+```
+l    = hash_to_prime(H_B("vtc-poe"; bigint256(N) || bigint256(g) || bigint256(h) || T(u64)))
+       — the smallest probable prime ≥ int_be(digest) (Miller–Rabin, 64 rounds), 256-bit
+r_l  = 2^T mod l
+π    = g^q mod N  where q = ⌊2^T / l⌋;  the party computes q mod φ = ((2^T mod φ) − r_l) · l^(−1) mod φ
+verify: π^l · g^(r_l) ≡ h (mod N)
+```
+
+**Time-lock puzzle of a scalar `m ∈ Zℓ`** (RSW):
+
+```
+r     ← [1, N−1] uniformly
+u     = g^r mod N
+y     = h^r mod N                       (= u^(2^T); the party uses h, a solver squares u T times)
+key   = blake3(bigint256(y))
+ct    = aead_seal(key, nonce = [0; 24], ad = bigint256(u), pt = m (32 bytes LE))    (48 bytes)
+Puzzle = (u, ct);  opening = (m, r);  forced opening: y = u^(2^T) by T squarings, then aead_open
+```
+
+**Shamir sharing** of `sk` with threshold `VTC_T = 33` over `Zℓ`:
+random polynomial `f` of degree 32 with `f(0) = sk`; `share_j = f(j)` for
+`j = 1..64`; `h_j = share_j · G`. Lagrange coefficient of index `i` over a set
+`S` at 0: `λ_i^S = Π_{k∈S, k≠i} k / (k − i) mod ℓ`.
+
+### 10.3 Commitment and verification
+
+Commit (party):
+
+1. Generate parameters (§10.1) and `poe`.
+2. Share `sk`; for each `j ∈ [1, 64]` build `Puzzle_j` of `share_j` with fresh `r_j`.
+3. Challenge set: `I = subset(H_B64("vtc-challenge"; vote_id || pk || N || g || h || poe || T || h_1..h_64 || Puzzle_1..Puzzle_64))`,
+   where `subset(seed)` reads the derive_key XOF in 1-byte steps, maps each
+   byte `b` to index `1 + (b mod 64)`, skipping duplicates, until 32 distinct
+   indices are drawn; `I` is that set sorted ascending.
+4. `openings` = `(share_j, r_j)` for `j ∈ I` in ascending `j`.
+
+Verify (everyone), all of:
+
+- [ ] proof of exponentiation for `(N, g, h, T)` passes.
+- [ ] `I` recomputed from the item equals the set implied by `openings`' count and order (32 entries, ascending).
+- [ ] for each `j ∈ I`: `h_j == share_j · G`; `u_j == g^(r_j) mod N`; `ct_j == aead_seal(blake3(h^(r_j) mod N), 0, u_j, share_j)`.
+- [ ] Lagrange consistency: for every unopened `j ∉ I`, with `S = I ∪ {j}`:
+      `Σ_{i∈S} λ_i^S · h_i == pk`  (paper's condition 1: any unopened share together with the 32 opened ones reconstructs `pk`).
+
+Soundness: a cheating party must make every unopened puzzle inconsistent and
+every opened one consistent, i.e. guess `I` exactly: probability
+`1 / C(64, 32) ≈ 2^−60.7`. Hiding: 32 opened shares of a degree-32 polynomial
+reveal nothing about `sk`; the remaining shares are inside puzzles of delay `T`.
+
+### 10.4 Delay requirement
+
+```
+required_delay(blocks) = blocks × 600 × S_MAX_RSA × 3 / 2          (M = 1.5)
+S_MAX_RSA              = 2^26 sequential 2048-bit modular squarings per second (assumed fastest hardware)
+T_MAX                  = 2^52
+```
+
+A key party is *selectable* (§11.1) for a vote only if
+`delay_T ≥ required_delay(close_block − h_a)` where `h_a` is the height of
+the earliest valid anchor covering it, and `h_a < open_block`. A party that
+registers early simply needs a longer delay. Verifiers report, per declared
+party, whether this held (it is a secrecy label, not a counting condition:
+A38).
+
+### 10.5 Opening
+
+- Voluntary: after `close_block` the party publishes `Share { vote_id, keyparty_id, sk }`.
+- Forced: any solver picks an unopened puzzle `j ∉ I`, computes
+  `y = u_j^(2^T) mod N` by `T` squarings, opens `ct_j` to `m`, checks
+  `m · G == h_j` (if not, that puzzle was dishonest — try another), then
+  `sk = Σ_{i∈I∪{j}} λ_i^{I∪{j}} · share_i`, checks `sk · G == pk`, and
+  publishes a `Share`. One honest unopened puzzle suffices.
+
+### 10.6 Deviations from the paper
+
+| # | Paper (Figure 2, VT-BLS / Schnorr) | Here | Reason |
+|---|---|---|---|
+| D1 | Secret is a signature; share commitments are partial public keys checked with pairings | Secret is the discrete log `sk`; commitments `h_j = share_j · G`; consistency via Lagrange in the exponent (the paper's condition 1) | Key parties commit to decryption keys, not signatures |
+| D2 | First `t−1` shares random, rest derived by Lagrange | Random degree-`t−1` polynomial with `f(0) = sk` | Equivalent distribution; simpler |
+| D3 | Range proof per puzzle + linearly homomorphic TLP packing so the solver solves one puzzle | No range proofs, no homomorphism; the solver solves unopened puzzles one at a time, and one honest one suffices | Packing was needed to open *all* unopened shares at once; here `t−1` opened + 1 solved share reconstruct, so a single puzzle already suffices. A party that cheated in some unopened puzzles (survives with probability `2^−(number cheated)`) costs the solver extra `T` attempts |
+| D4 | LHTLP (Paillier-style) puzzles | RSW puzzle + XChaCha20-Poly1305 of the share | No homomorphism needed |
+| D5 | `pp = (N, g, h)` from a setup, optionally sampled by the signer | Per-party `N` with a Wesolowski proof of exponentiation for `h` | Here the solver is never the party, so `h` must be publicly verifiable or the puzzles could be made unsolvable |
+| D6 | `(t, n)` left as parameters | `n = 64`, `t = 33`, `|I| = 32` | Soundness `2^−60.7`, item ≈ 32 KB |
+| D7 | Random oracle `H'` | BLAKE3 `derive_key` XOF with rejection sampling | Byte-exactness |
 
 ---
 
-## 11. Ballot encryption (whitepaper §8) — **BLOCKED (BLOCKERS.md #1)**
+## 11. Ballot encryption (secrecy = keyparties)
 
-Format and determinism rule are in §6.4 and are final. The open question is
-solely how the client obtains `K` (or an equivalent public encryption key)
-before the deadline without doing the sequential work. See `BLOCKERS.md`.
+### 11.1 Party selection (client)
+
+At cast time the client takes every KeyParty item for the vote that is
+intrinsically valid, not excluded by the duplicate rule, anchored at height
+`h_a < open_block`, and satisfies §10.4; sorts their `keyparty_id`s; keeps at
+most `MAX_KEY_PARTIES` (the lexicographically smallest ids). This is
+`party_ids`. `PK = Σ pk_i` over them (`PK = identity` if none; the privacy
+indicator then reports "no key parties").
+
+### 11.2 Encryption
+
+```
+r        = scalar_wide(H_B64("rand"; s_bytes || vote_id))
+c1       = r · G
+c2       = option_index · G + r · PK
+payload  = enc(party_ids) || c1 || c2
+```
+
+### 11.3 Decryption (counting rule, after `close_block`)
+
+```
+SK = Σ sk_i over the ballot's party_ids          (each from a valid Share)
+M  = c2 − SK · c1
+option_index = m such that m · G == M, m < options.len()   (table lookup); none → ballot discarded
+```
+
+### 11.4 Secrecy properties (recorded, A36–A37)
+
+Secrecy until `close_block` holds if at least one declared key party is honest
+(keeps `sk_i` secret and chose a sufficient `T_i`). Full collusion of all key
+parties yields only an early **anonymous** count, never identities or any
+change to the result. A person holding `k` credentials can register `k`
+parties and withhold their shares, forcing `k` parallel `T`-length
+computations before the result appears: a liveness cost bounded by the
+Issuer's Sybil resistance.
 
 ---
 
 ## 12. Counting rule (whitepaper §8–§10)
 
 Inputs: a Log snapshot (§15), a header chain, a `vote_id`. Output: one of
-`Pending` (no Solution), `Result { guarantee, counts }`, `BelowMinimum { guarantee, counted }`.
+`Result { guarantee, counts }`, `BelowMinimum { guarantee, counted }`,
+`NotClosed`, `Pending { missing_shares }` (keyparties only).
 
 ```
 fn tally(snap, headers, vote_id):
     vd = snap.vote_definitions[vote_id]; require valid(vd)
 
-    // 1. anchors → earliest height per item id
-    anchors  = [a for a in snap.anchors if anchor_valid(a, headers)]
-    height_of = {}                               // item_id -> min height
+    // 1. anchors → earliest height per content id
+    anchors   = [a for a in snap.anchors if anchor_valid(a, headers)]
+    height_of = {}                               // content_id -> min height
     for a in anchors, id in a.leaves:
         height_of[id] = min(height_of.get(id, ∞), a.height)
 
     // 2. intrinsically valid ballots of this vote
-    ballots = [b for b in snap.ballots if b.vote_id == vote_id and ballot_valid(b, vd)]
+    ballots = [b for b in snap.ballots if b.vote_id == vote_id and ballot_valid(b, vd, snap)]
 
     // 3. timeliness and guarantee level
     anchored = [b for b in ballots if height_of.get(b.id, ∞) <= vd.close_block]
@@ -616,22 +799,30 @@ fn tally(snap, headers, vote_id):
         guarantee = FALLBACK                      // whitepaper §9 degraded mode
         timely = [b for b in ballots
                   if |{w.node_key for w in snap.witnesses
-                       if w.item_id == b.id and w.vote_id == vote_id
+                       if w.content_id == b.id and w.vote_id == vote_id
                        and witness_valid(w, snap)}| >= W]
 
     // 4. duplicate rule among timely ballots (§7.1)
     by_null = group timely by nullifier
     unique  = [any(group) for group in by_null if all(x.id == group[0].id for x in group)]
 
-    // 5. opening
-    sol = first valid Solution for vote_id in snap, else return Pending
-    K = blake3(sol.y_bytes)
+    // 5. plaintexts
     counts = [0] * len(vd.options)
-    for b in unique:
-        nonce, ct = b.ciphertext[0..24], b.ciphertext[24..]
-        pt = aead_open(K, nonce, vd.vote_id || b.nullifier, ct)
-        if pt is Err or len(pt) != 1 or pt[0] >= len(vd.options): continue
-        counts[pt[0]] += 1
+    if vd.secrecy == none:
+        for b in unique: counts[b.payload[0]] += 1
+    else:
+        if headers.tip_height <= vd.close_block: return NotClosed
+        unique = [b for b in unique
+                  if all(height_of.get(p, ∞) < vd.open_block for p in b.party_ids)]
+        needed = ∪ b.party_ids over unique
+        shares = {kp: sk for Share(vote_id, kp, sk) in snap if share_valid(...)}
+        if needed ⊄ keys(shares): return Pending { missing_shares: needed − keys(shares) }
+        for b in unique:
+            SK = Σ shares[p] for p in b.party_ids
+            M  = b.c2 − SK · b.c1
+            m  = dlog_table(M)                       // m < len(options), else None
+            if m is None: continue
+            counts[m] += 1
 
     if sum(counts) < vd.min_ballots: return BelowMinimum { guarantee, counted: sum(counts) }
     return Result { guarantee, counts }
@@ -639,10 +830,12 @@ fn tally(snap, headers, vote_id):
 
 Notes:
 
-- `open_block` does not restrict counting: a ballot anchored at any height
-  ≤ `close_block` counts (A5).
-- The whitepaper's "published before the Solution" condition is implied by the
-  anchoring condition and is not evaluated separately (A6).
+- `open_block` does not restrict counting under `none`: a ballot anchored at
+  any height ≤ `close_block` counts (A5). Under `keyparties` the declared
+  parties must have been anchored before `open_block` (A38).
+- The whitepaper's "published before the Solution" condition has no analogue:
+  decryption is gated on `tip_height > close_block` and on all shares being
+  present (A6).
 - The result is a pure function of `(snap, headers, vote_id)`; a later snapshot
   may contain more anchors and therefore more counted ballots.
 
@@ -664,14 +857,15 @@ fn derive_vote(snap, headers, init) -> Option<VoteDefinition>:
         question: init.text, options: ["Yes", "No"],
         registry_root: init.registry_root,
         open_block: open, close_block: close,
-        min_ballots: MIN_BALLOTS, puzzle_T: puzzle_t(open, close),
+        min_ballots: MIN_BALLOTS, secrecy: init.secrecy,
         origin: Initiative { initiative_id: init.id },
     }
 ```
 
 `open_block` is derived from the *deadline*, not from the threshold-anchor
 block, so that a late-published anchor cannot change the derived `vote_id`
-(A7). Options are fixed to Yes/No (A8).
+(A7). Options are fixed to Yes/No (A8). Key parties for a derived vote register
+between the deadline and `open_block` (144 blocks) like for any other vote.
 
 ---
 
@@ -684,8 +878,11 @@ block, so that a late-published anchor cannot change the derived `vote_id`
 | `MAX_VOTE_BLOCKS` | 52 560 (≈ 1 year) | A12 |
 | `MAX_ITEM_BYTES` | 8 MiB | A12 |
 | `MAX_ANCHOR_LEAVES` | 1 000 000 | A12 |
-| `S_MAX` | 2^20 squarings/s | whitepaper §7 (value chosen, A13) |
+| `MAX_KEY_PARTIES` | 32 per ballot | A38 |
+| `VTC_N`, `VTC_T`, `VTC_OPEN` | 64, 33, 32 | §10.6 D6 |
+| `S_MAX_RSA` | 2^26 squarings/s | A13 |
 | `M` | 1.5 | whitepaper §14 |
+| `T_MAX` | 2^52 | user decision, A13 |
 | `MIN_BALLOTS` | 100 | whitepaper §14 |
 | `W` (fallback witnesses) | 7 | whitepaper §14 |
 | `initiative_threshold(size)` | `ceil(size / 100)` | whitepaper §14 (1 %) |
@@ -694,12 +891,12 @@ block, so that a late-published anchor cannot change the derived `vote_id`
 | `MIN_CONFIRMATIONS` | 6 | A14 |
 | Mix hops / hold / paths / guard rotation | 3 / `max(3 s, 8 msgs)`, cap 60 s / 2 / 90 days | whitepaper §14 |
 | OTS calendars per submission | 3 | whitepaper §14 |
-| `DEV_PUZZLE_T` | 1024 | dev mode only |
 
 Dev mode (`dev_mode = true`, one flag, warning printed at startup) enables
-exactly: `DEV_PUZZLE_T`, the `0xFF` Dev anchor proof, the deterministic
-Groth16 setup, the mock Issuer, and a mock header chain driven by the local
-clock. Nothing else differs.
+exactly: the `0xFF` Dev anchor proof, the deterministic Groth16 setup, the
+mock Issuer, a mock header chain driven by the local clock, and (Phase 10) a
+`DEV_T_MIN` override that lets key parties choose tiny delays. Nothing else
+differs.
 
 ---
 
@@ -718,54 +915,63 @@ every result.
 
 ## 16. Receipt code (whitepaper §15)
 
-`receipt(n, c) = base32_crockford(H_B("receipt"; n || c)[0..5])` — 8 characters,
-displayed by the device and recomputable by anyone who can see the ballot.
+`receipt(n, payload) = base32_crockford(H_B("receipt"; n || payload)[0..5])` —
+8 characters, displayed by the device and recomputable by anyone who can see
+the ballot.
 
 ---
 
 ## 17. Test vectors
 
-Generated by the reference implementation; independent implementations must
-match. Vectors for proof-bearing items (Ballot, Support, Initiative,
-NodeRegistration), Poseidon and the circuit are produced in Phase 1–2 into
-`crates/core/tests/vectors/`. The Solution vector waits on BLOCKER #1.
+Generated by an implementation independent of `cv-core` (a scratch program
+over the same crates); the reference implementation must match. Vectors for
+proof-bearing items (Ballot proof, Support, Initiative, NodeRegistration,
+KeyParty), Poseidon and the circuit are produced in Phases 1–2 (and 10) into
+`crates/core/tests/vectors/`.
 
 ### 17.1 BLAKE3 tagged hashes
 
 ```
 s (Fr = 1, LE)                 = 0100000000000000000000000000000000000000000000000000000000000000
-vote_id                        = abababababababababababababababababababababababababababababababab
+vote_id (vector input)         = abababababababababababababababababababababababababababababababab
 H_B("rand"; s || vote_id)       = 51b04684db6d0d3b11b4ec074b165ddc1a761f8a692b5341b571d56aa76a5049
-H_B("discriminant"; vote_id)    = 491b14e5acc99460d6ca14609cccae90bd97c560373a56581fedacb7bf0075ee   (without blockhash, for the tag only)
-H_B("generator"; vote_id)       = 4e15baf0700b3b5777b4fefead1bacc467b2c083fd9cfafbd1a0600daa9b9ae8
 H_B("proof-rand"; s || vote_id) = f40b4e9cc884f373fbf42ed02a26aa0a3dfa83a62b98c1547f223e7a07fd7aed
 blake3("")                     = af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
 blake3("abc")                  = 6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85
 ```
 
-### 17.2 VoteDefinition (Authority origin)
+### 17.2 VoteDefinition (Authority origin, secrecy = none)
 
 Inputs: question `"Should the bridge be built?"`, options `["Yes", "No"]`,
 `registry_root = Fr(7)`, `open_block = 900000`, `close_block = 901008`,
-`min_ballots = 100`, `puzzle_T = 1000` (vector only; not a valid `puzzle_t`
-value), authority Ed25519 seed `0x42 × 32`.
+`min_ballots = 100`, `secrecy = 0x00`, authority Ed25519 seed `0x42 × 32`.
 
 ```
 authority key = 2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12
-unsigned body (135 bytes) =
+unsigned body (128 bytes) =
   0101 1b000000 53686f756c642074686520627269646765206265206275696c743f
   02000000 03000000 596573 02000000 4e6f
   0700000000000000000000000000000000000000000000000000000000000000
-  a0bb0d00 90bf0d00 64000000 e803000000000000
+  a0bb0d00 90bf0d00 64000000 00
   00 2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12
-vote_id   = ba355c27022805d30a45fa878897cab6f785ce9714613bf2afbfa250f9bcbb19
-signature = 5b26cd265807b1ab28b7767c9295cd9d85f4a81715e2ffaf10f8379dddf7954d
-            95b62f9656e965890125bac659545095109ecc4e2532cc6d0b4e5cc87e530d0d
-item (199 bytes) = unsigned body || signature
-item_hash = 12519238b7ada072e6447a8a43e3b635f69a387be0999416d7ed8e00988f1405
+vote_id   = 1b85ac5e6f3d29dfca5f4a65c04054c7bec252db66ffaffd052e345ce1c1eb09
+signature = b2ec980b7597e063a7f65473ad0c9cead988dbc19c5279ae6ce2d75952cc6c66
+            2d069bb6df161d2133988b26ca4ad4203ca8c99a91685735e34e7f9dad764306
+item (192 bytes) = unsigned body || signature
+item_hash = e0fdeb2c92f6d5b889ffc59dff319b7a673ce8fd42f03dba2004102dca69c038
 ```
 
-### 17.3 Anchor Merkle tree and Anchor item (Dev proof)
+### 17.3 Ballot content preimage (secrecy = none)
+
+`vote_id` from 17.2, `nullifier = Fr(5)`, `payload = [0x01]`:
+
+```
+content preimage (71 bytes) =
+  0104 1b85ac5e…c1eb09 0500000000000000000000000000000000000000000000000000000000000000 01000000 01
+ballot_id = b855b6703818caf09bdc43425196236aef1cf4687fc0533ea0d3b7d34eac7aa5
+```
+
+### 17.4 Anchor Merkle tree and Anchor item (Dev proof)
 
 Leaves are `blake3("a")`, `blake3("b")`, `blake3("c")` sorted:
 
@@ -784,24 +990,24 @@ anchor item (107 bytes, height 900500, Dev proof) =
 anchor_id = 465ba7ed5a45d67b4c3ae199bc72273635fedb9c31167c5dbcdcefc7b14825dd
 ```
 
-### 17.4 Witness
+### 17.5 Witness
 
-Node Ed25519 seed `0x07 × 32`, `item_id = id[0]` above, `vote_id` from 17.2:
+Node Ed25519 seed `0x07 × 32`, `content_id = id[0]` above, `vote_id` from 17.2:
 
 ```
 node key   = ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c
 item (162 bytes) =
-  0108 10e5cf3d…c1d553 ba355c27…bcbb19 ea4a6c63…46d22c
-  dab5878182284d306e113a2bacbccfabe4af29989c593a923a7ed3596112b410
-  da81969b62d4a3948440957a70edf184a5f5299522e0ac7da2105a6a23cfc906
-witness_id = c595df55662bc595ab020ea4c95e43d821149105d6ffeda7a057604fa3020f3f
+  0108 10e5cf3d…c1d553 1b85ac5e…c1eb09 ea4a6c63…46d22c
+  c718229e8a39151dd8168cca00e300b56070ab04ce1c1f028ec766a95360a49c
+  4954025a9572fd16caf6aa2821420bc9005fa907c402ff9f4f3f9c192a5dd101
+witness_id = db8b09f07b50ede4d8caf6abd41afefd29c47870f469ba8707de6fdc7763bd64
 ```
 
-### 17.5 Receipt
+### 17.6 Receipt
 
-`n = Fr(5)`, `c = 0x11 × 17`:
-`H_B("receipt"; n || c) = 625e131a87f09cf2935b4e702ff59a9514b2918fe8bf7e65c349f99e6fd36290`.
+`n = Fr(5)`, `payload = 0x11 × 17`:
+`H_B("receipt"; n || payload) = 625e131a87f09cf2935b4e702ff59a9514b2918fe8bf7e65c349f99e6fd36290`.
 
-### 17.6 Poseidon tag fields
+### 17.7 Poseidon tag fields
 
 See §3.1 table (decimal values are normative).

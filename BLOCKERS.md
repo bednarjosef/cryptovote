@@ -3,7 +3,19 @@
 Issues that cannot be resolved by choosing a simpler option, per the brief's
 "When you are unsure" rule. Each needs a decision from the protocol author.
 
-## #1 — Ballot encryption under `K = H(y)` is not realizable with a trapdoorless puzzle  (OPEN)
+## #1 — Ballot encryption under `K = H(y)` is not realizable with a trapdoorless puzzle  (RESOLVED 2026-09-03)
+
+**Decision (protocol author):** whitepaper §7 is confirmed wrong. Neither
+option A (drand) nor option B (drop G4). A third option, **key parties**, is
+adopted: a per-vote `secrecy ∈ {none, keyparties}` field; `none` (plaintext
+option index, public running count) ships first and Phases 3–9 are completed
+on it; `keyparties` follows: anyone registers before `open_block` with an EC
+public key and a verifiable timed commitment (Thyagarajan et al., CCS 2020) to
+its secret key, one registration per person and vote by nullifier; ballots
+are EC-ElGamal under the aggregate key; decryption needs every share; parties
+publish shares after close or anyone force-opens the commitment. Full design:
+`SPEC.md` §10–§11, assumptions A35–A40. The class-group VDF and `kyn-vdf`
+are dropped. The analysis below is kept for the record.
 
 **Where:** whitepaper §7 ("Any participant can derive K's *encryption* input
 cheaply (encryption uses `g` and `T`, not `y`); only *decryption* requires the
@@ -50,14 +62,10 @@ must be added to the §2 table. If the author prefers zero external trust,
 Option B is the only implementable alternative today, and G4 must be moved to
 non-goals.
 
-**What is blocked until decided:** Phase 3 (puzzle and ballot encryption), the
-`Solution` item format, and the `K`-derivation part of the counting rule.
-Phases 1, 2, 4, 5, 6 (except opening), 7, 8 (except opening) can proceed.
+**Was blocked until decided:** Phase 3 and the opening half of the counting
+rule. Now unblocked; nothing remains open.
 
 ## No other blockers
 
 Every other primitive named in the whitepaper has a suitable maintained crate
-(see `DEPENDENCIES.md`). The class-group puzzle itself (discriminant
-derivation, sequential squaring, Wesolowski proof, verification in WASM) is
-available through `kyn-vdf`; it is the *use* of the puzzle for encryption that
-is blocked, not the primitive.
+(see `DEPENDENCIES.md`).
