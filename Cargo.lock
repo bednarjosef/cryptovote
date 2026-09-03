@@ -821,10 +821,12 @@ dependencies = [
 name = "cv-core"
 version = "0.1.0"
 dependencies = [
+ "ark-ff",
  "cv-crypto",
  "hex",
  "rand 0.8.8",
  "rand_chacha",
+ "serde_json",
  "thiserror",
 ]
 

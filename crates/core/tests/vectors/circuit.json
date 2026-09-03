@@ -1,0 +1,14 @@
+{
+  "circuit": "membership (SPEC §5)",
+  "constraints": 8499,
+  "dev_setup_seed_utf8": "cryptovote dev groth16 setup !!!",
+  "dev_vk_blake3": "684979429cc1a5693827c7377dd6e4d9ea86849d2d4ba960c48c08f2aaaa0577",
+  "public_inputs": [
+    "root",
+    "nullifier",
+    "tag",
+    "id",
+    "signal"
+  ],
+  "warning": "the development setup is INSECURE; release builds must load ceremony keys"
+}

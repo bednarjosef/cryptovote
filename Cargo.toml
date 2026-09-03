@@ -71,3 +71,8 @@ tracing = "0.1"
 
 [profile.release]
 opt-level = 3
+
+# Optimize dependencies (arkworks, blake3, …) even in dev/test builds; the
+# workspace crates themselves stay unoptimized for fast incremental builds.
+[profile.dev.package."*"]
+opt-level = 3

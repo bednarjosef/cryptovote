@@ -40,6 +40,7 @@ mod tests {
         assert_eq!(tag_field("author"), Fr::from(125822819399009u64));
         assert_eq!(tag_field("node"), Fr::from(1701080942u64));
         assert_eq!(tag_field("keyparty"), Fr::from(8751745738712114539u64));
+        assert_eq!(tag_field("commit"), Fr::from(127996156276579u64));
     }
 
     #[test]

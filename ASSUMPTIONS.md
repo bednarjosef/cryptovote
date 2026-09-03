@@ -17,6 +17,15 @@ with two arguments and `H(s, "ballot", vote_id)` with three; the circuit uses
 one fixed-arity `poseidon(s, tag, id)` with `id = 0` for the two-argument
 cases, so a single circuit serves all items.
 
+**A41 — Identity commitment carries a domain tag.** The arkworks Poseidon
+sponge has no length padding: absorbing `[x]` and `[x, 0]` leaves the same
+state, so `poseidon(x) = poseidon(x, 0) = node(x, EMPTY_LEAF)`. With
+`C = poseidon(s)` a public leaf value would be the "secret" of a commitment
+equal to a tree node. The fixed 32-level walk happens to make that unusable
+for forging membership, but the collision is gratuitous, so
+`C = poseidon(s, tag_field("commit"))` and the arity-1 hash is not used at
+all. (Found by a test in Phase 2.)
+
 **A11 — Registry tree.** Sparse binary tree of fixed depth 32 (≈ 4.3 × 10⁹
 leaves, enough for any continent; proving cost is 32 Poseidon hashes).
 Empty leaf = `Fr(0)`. Leaf indices are assigned by the Issuer in enrollment

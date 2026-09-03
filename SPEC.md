@@ -78,10 +78,10 @@ computes them with arguments `(prime_bits = 254, rate = 2, full_rounds = 8,
 partial_rounds = 57, skip_matrices = 0)`, giving
 `PoseidonConfig { full_rounds: 8, partial_rounds: 57, alpha: 5, rate: 2, capacity: 1 }`.
 
-`poseidon(x_1, …, x_k)` (k ∈ {1, 2, 3}) is `ark_crypto_primitives::crh::poseidon::CRH::evaluate`
+`poseidon(x_1, …, x_k)` (k ∈ {2, 3}) is `ark_crypto_primitives::crh::poseidon::CRH::evaluate`
 on the input vector: a sponge with the parameters above absorbs the `k`
 elements and squeezes one. The round constants and MDS matrix, and hash
-vectors for k = 1, 2, 3, are dumped by the reference implementation into
+vectors for k = 2, 3, are dumped by the reference implementation into
 `crates/core/tests/vectors/poseidon.json` (Phase 2) so that other-language
 implementers can copy the constants instead of re-deriving them.
 
@@ -200,6 +200,7 @@ A tag is mapped to `Fr` as the little-endian integer of its ASCII bytes:
 | `"author"` | `617574686f72` | 125822819399009 |
 | `"node"` | `6e6f6465` | 1701080942 |
 | `"keyparty"` | `6b65797061727479` | 8751745738712114539 |
+| `"commit"` | `636f6d6d6974` | 127996156276579 |
 
 All nullifier-like values are computed with one fixed-arity function:
 
@@ -215,7 +216,10 @@ nullifier(s, tag, id) = poseidon(s, tag_field(tag), id_field)
 | node nullifier `n` | `"node"` | `0` |
 | key-party nullifier `n` | `"keyparty"` | `fr_mod(vote_id)` |
 
-Identity commitment: `C = poseidon(s)` (arity 1).
+Identity commitment: `C = poseidon(s, tag_field("commit"))`. The arity-1 hash
+is never used anywhere: the sponge has no length padding, so `poseidon(x)`
+equals `poseidon(x, 0)`, i.e. a Merkle node whose right child is the empty
+leaf (A41).
 
 ### 3.2 Outside-circuit (BLAKE3) tags
 
@@ -239,7 +243,7 @@ Identity commitment: `C = poseidon(s)` (arity 1).
 
 `s` is a uniformly random element of `Fr`, generated on the device from 64
 random bytes reduced modulo `r`, stored in the secure element, never exported.
-`C = poseidon(s)`.
+`C = poseidon(s, tag_field("commit"))` (§3.1).
 
 ### 4.2 Registry tree
 
@@ -297,7 +301,7 @@ One circuit serves all five proof-bearing items.
 **Constraints:**
 
 ```
-leaf      = poseidon(s)
+leaf      = poseidon(s, tag_field("commit"))
 root      = merkle_root(leaf, siblings, index_bits)     (32 levels, §4.2 rule)
 nullifier = poseidon(s, tag, id)
 signal * signal = signal_sq                              (binds signal; result unused)
