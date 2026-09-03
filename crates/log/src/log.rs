@@ -350,6 +350,12 @@ impl Log {
     }
 
     fn retry_orphans_for(&mut self, content_id: &Id, item_type: ItemType) {
+        if matches!(
+            item_type,
+            ItemType::Support | ItemType::Anchor | ItemType::Initiative
+        ) {
+            self.derive_votes();
+        }
         let mut pending = Vec::new();
         match item_type {
             ItemType::VoteDefinition => {
@@ -377,6 +383,20 @@ impl Log {
         }
         for bytes in pending {
             let _ = self.insert(&bytes);
+        }
+    }
+
+    /// Publish the deterministically derived VoteDefinition of every
+    /// initiative whose threshold is reached (SPEC §13). Identical bytes on
+    /// every node, so it gossips like any other item.
+    fn derive_votes(&mut self) {
+        let ids: Vec<Id> = self.initiatives.keys().copied().collect();
+        for id in ids {
+            if let Some(vd) = cv_core::tally::derive_vote(self, &id) {
+                if !self.votes.contains_key(&vd.vote_id()) {
+                    let _ = self.insert(&Item::VoteDefinition(vd).encode());
+                }
+            }
         }
     }
 

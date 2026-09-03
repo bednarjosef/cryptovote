@@ -83,6 +83,9 @@ struct Args {
     /// OTS calendar base URLs (repeatable; default: four public calendars).
     #[arg(long = "calendar")]
     calendars: Vec<String>,
+    /// Witness role: seed (hex) of this node's registered Ed25519 key.
+    #[arg(long)]
+    witness_key_seed: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -283,6 +286,12 @@ async fn main() -> anyhow::Result<()> {
         args.calendars.clone()
     };
     let config = NodeConfig {
+        witness_key: match &args.witness_key_seed {
+            Some(seed) => Some(cv_core::crypto::sig::SigningKey::from_seed(&parse_key(
+                seed,
+            )?)),
+            None => None,
+        },
         name: args.name,
         listen: args.listen,
         peers: args.peers,

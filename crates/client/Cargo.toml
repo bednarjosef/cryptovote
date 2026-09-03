@@ -26,3 +26,6 @@ serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 tokio.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+ark-ff.workspace = true

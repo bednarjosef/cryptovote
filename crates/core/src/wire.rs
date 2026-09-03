@@ -86,3 +86,42 @@ pub struct Status {
 pub struct Tip {
     pub height: Option<u32>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResultJson {
+    pub vote_id: String,
+    pub question: String,
+    pub options: Vec<String>,
+    pub secrecy: String,
+    /// "result" | "below_minimum" | "not_closed" | "pending" | "unknown"
+    pub outcome: String,
+    pub guarantee: Option<String>,
+    pub counts: Option<Vec<u64>>,
+    pub counted: Option<u64>,
+    pub missing_shares: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InitiativeSummary {
+    pub initiative_id: String,
+    pub text: String,
+    pub threshold_n: u32,
+    pub support_deadline_block: u32,
+    pub secrecy: String,
+    pub supports: usize,
+    pub derived_vote_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnrollRequest {
+    pub eid: String,
+    pub commitment: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnrollResponse {
+    pub index: u32,
+    pub epoch: u64,
+    pub root: String,
+    pub replaced: bool,
+}

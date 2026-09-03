@@ -176,7 +176,7 @@ pub fn tally(view: &impl LogView, vote_id: &Id) -> Option<Outcome> {
                 });
             }
             for (_, p) in &unique {
-                if let Some(idx) = crate::keyparties::decrypt(&p, &shares, vd.options.len()) {
+                if let Some(idx) = crate::keyparties::decrypt(p, &shares, vd.options.len()) {
                     counts[idx] += 1;
                 }
             }
@@ -221,4 +221,52 @@ pub fn derive_vote(view: &impl LogView, initiative_id: &Id) -> Option<VoteDefini
             initiative_id: *initiative_id,
         },
     })
+}
+
+impl Outcome {
+    /// JSON form served by nodes and printed by the verifier.
+    pub fn to_wire(&self, vote_id: &Id, vd: &VoteDefinition) -> crate::wire::ResultJson {
+        let (outcome, guarantee, counts, counted, missing) = match self {
+            Outcome::Result {
+                guarantee,
+                counts,
+                counted,
+            } => (
+                "result",
+                Some(guarantee.to_string()),
+                Some(counts.clone()),
+                Some(*counted),
+                vec![],
+            ),
+            Outcome::BelowMinimum { guarantee, counted } => (
+                "below_minimum",
+                Some(guarantee.to_string()),
+                None,
+                Some(*counted),
+                vec![],
+            ),
+            Outcome::NotClosed => ("not_closed", None, None, None, vec![]),
+            Outcome::Pending {
+                guarantee,
+                missing_shares,
+            } => (
+                "pending",
+                Some(guarantee.to_string()),
+                None,
+                None,
+                missing_shares.iter().map(hex::encode).collect(),
+            ),
+        };
+        crate::wire::ResultJson {
+            vote_id: hex::encode(vote_id),
+            question: vd.question.clone(),
+            options: vd.options.clone(),
+            secrecy: format!("{:?}", vd.secrecy).to_lowercase(),
+            outcome: outcome.into(),
+            guarantee,
+            counts,
+            counted,
+            missing_shares: missing,
+        }
+    }
 }

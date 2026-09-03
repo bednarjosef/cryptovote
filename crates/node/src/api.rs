@@ -26,6 +26,8 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/inventory", get(inventory))
         .route("/v1/votes", get(votes))
         .route("/v1/votes/{id}/ballots", get(vote_ballots))
+        .route("/v1/votes/{id}/result", get(vote_result))
+        .route("/v1/initiatives", get(initiatives))
         .route("/v1/votes/{id}/nullifier/{n}", get(nullifier_status))
         .route("/v1/anchors", get(anchors))
         .route("/v1/anchors/{id}/proof/{cid}", get(anchor_proof))
@@ -37,17 +39,12 @@ pub fn router(node: Arc<Node>) -> Router {
         .with_state(node)
 }
 
-fn parse_id(s: &str) -> Result<Id, Response> {
-    hex::decode(s)
-        .ok()
-        .and_then(|v| v.try_into().ok())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "expected 32-byte hex id").into_response())
+fn parse_id(s: &str) -> Option<Id> {
+    hex::decode(s).ok().and_then(|v| v.try_into().ok())
 }
 
-fn parse_fr(s: &str) -> Result<Fr, Response> {
-    let b = parse_id(s)?;
-    fr_from_canonical(&b)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "non-canonical field element").into_response())
+fn parse_fr(s: &str) -> Option<Fr> {
+    fr_from_canonical(&parse_id(s)?)
 }
 
 fn octets(bytes: Vec<u8>) -> Response {
@@ -118,7 +115,7 @@ async fn submit(State(node): State<Arc<Node>>, body: Bytes) -> (StatusCode, Json
 }
 
 async fn get_item(State(node): State<Arc<Node>>, Path(id): Path<String>) -> Response {
-    let Ok(id) = parse_id(&id) else {
+    let Some(id) = parse_id(&id) else {
         return not_found();
     };
     let log = node.log.lock().unwrap();
@@ -129,7 +126,7 @@ async fn get_item(State(node): State<Arc<Node>>, Path(id): Path<String>) -> Resp
 }
 
 async fn get_by_hash(State(node): State<Arc<Node>>, Path(hash): Path<String>) -> Response {
-    let Ok(h) = parse_id(&hash) else {
+    let Some(h) = parse_id(&hash) else {
         return not_found();
     };
     let log = node.log.lock().unwrap();
@@ -186,7 +183,7 @@ async fn votes(State(node): State<Arc<Node>>) -> Json<Vec<VoteSummary>> {
 }
 
 async fn vote_ballots(State(node): State<Arc<Node>>, Path(id): Path<String>) -> Response {
-    let Ok(id) = parse_id(&id) else {
+    let Some(id) = parse_id(&id) else {
         return not_found();
     };
     let log = node.log.lock().unwrap();
@@ -208,7 +205,7 @@ async fn nullifier_status(
     State(node): State<Arc<Node>>,
     Path((id, n)): Path<(String, String)>,
 ) -> Response {
-    let (Ok(id), Ok(n)) = (parse_id(&id), parse_fr(&n)) else {
+    let (Some(id), Some(n)) = (parse_id(&id), parse_fr(&n)) else {
         return not_found();
     };
     let log = node.log.lock().unwrap();
@@ -247,7 +244,7 @@ async fn anchor_proof(
     State(node): State<Arc<Node>>,
     Path((id, cid)): Path<(String, String)>,
 ) -> Response {
-    let (Ok(id), Ok(cid)) = (parse_id(&id), parse_id(&cid)) else {
+    let (Some(id), Some(cid)) = (parse_id(&id), parse_id(&cid)) else {
         return not_found();
     };
     let log = node.log.lock().unwrap();
@@ -302,7 +299,7 @@ async fn post_registry(State(node): State<Arc<Node>>, body: Bytes) -> Response {
 }
 
 async fn registry_snapshot(State(node): State<Arc<Node>>, Path(root): Path<String>) -> Response {
-    let Ok(root) = parse_fr(&root) else {
+    let Some(root) = parse_fr(&root) else {
         return not_found();
     };
     let log = node.log.lock().unwrap();
@@ -313,7 +310,7 @@ async fn registry_snapshot(State(node): State<Arc<Node>>, Path(root): Path<Strin
 }
 
 async fn registry_leaves(State(node): State<Arc<Node>>, Path(root): Path<String>) -> Response {
-    let Ok(root) = parse_fr(&root) else {
+    let Some(root) = parse_fr(&root) else {
         return not_found();
     };
     let log = node.log.lock().unwrap();
@@ -333,4 +330,37 @@ async fn tip(State(node): State<Arc<Node>>) -> Json<Tip> {
 async fn snapshot(State(node): State<Arc<Node>>) -> Response {
     let log = node.log.lock().unwrap();
     octets(log.export_snapshot())
+}
+
+async fn vote_result(State(node): State<Arc<Node>>, Path(id): Path<String>) -> Response {
+    let Some(id) = parse_id(&id) else {
+        return not_found();
+    };
+    let log = node.log.lock().unwrap();
+    let Some(vd) = cv_core::context::Context::vote(&*log, &id) else {
+        return not_found();
+    };
+    match cv_core::tally::tally(&*log, &id) {
+        Some(outcome) => Json(outcome.to_wire(&id, &vd)).into_response(),
+        None => not_found(),
+    }
+}
+
+async fn initiatives(State(node): State<Arc<Node>>) -> Json<Vec<InitiativeSummary>> {
+    let log = node.log.lock().unwrap();
+    let mut out: Vec<InitiativeSummary> = log
+        .initiatives()
+        .map(|(id, i)| InitiativeSummary {
+            initiative_id: hex::encode(id),
+            text: i.text.clone(),
+            threshold_n: i.threshold_n,
+            support_deadline_block: i.support_deadline_block,
+            secrecy: format!("{:?}", i.secrecy).to_lowercase(),
+            supports: log.supports_of(id).len(),
+            derived_vote_id: cv_core::tally::derive_vote(&*log, id)
+                .map(|v| hex::encode(v.vote_id())),
+        })
+        .collect();
+    out.sort_by(|a, b| a.initiative_id.cmp(&b.initiative_id));
+    Json(out)
 }

@@ -37,6 +37,22 @@ impl Domain {
 #[derive(Clone)]
 pub struct SigningKey(ed25519_dalek::SigningKey);
 
+impl std::fmt::Debug for SigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SigningKey(pub {})",
+            self.0
+                .verifying_key()
+                .to_bytes()
+                .iter()
+                .take(4)
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        )
+    }
+}
+
 impl SigningKey {
     pub fn from_seed(seed: &[u8; 32]) -> Self {
         SigningKey(ed25519_dalek::SigningKey::from_bytes(seed))

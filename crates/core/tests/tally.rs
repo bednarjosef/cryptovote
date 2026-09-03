@@ -494,7 +494,7 @@ fn initiative_derivation_and_snapshot_roundtrip() {
         })
         .encode(), // invalid
     ];
-    let bytes = encode_snapshot(&[w.snapshot.clone()], &items);
+    let bytes = encode_snapshot(std::slice::from_ref(&w.snapshot), &items);
     let loaded = SnapshotView::load(
         &bytes,
         w.deployment.clone(),

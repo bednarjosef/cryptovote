@@ -196,3 +196,27 @@ The class-group puzzle of the original Phase 3 no longer exists (BLOCKERS.md
   header chain confirmations and file round trip; dev anchorer anchors
   automatically; OTS anchorer end to end against a mock calendar (pending →
   nothing anchored → attested + header → anchor published and re-verified).
+
+## Phase 6 — Vote lifecycle and tally  (2026-09-03)
+
+- Log: when a Support, Anchor or Initiative arrives, every initiative whose
+  threshold is now reached gets its derived VoteDefinition inserted
+  automatically (identical bytes on every node, gossiped like any item).
+- Node API: `GET /v1/votes/{id}/result` (counting rule output with guarantee
+  level), `GET /v1/initiatives` (supports, derived vote id). Witness role:
+  a node with a registered key signs ballots of open votes (whitepaper §9
+  fallback carrier).
+- `cv-issuer`: reference issuer with the **mock eID backend** (dev only,
+  prints a warning), enrollment with in-place replacement, signed snapshots,
+  JSON state file, HTTP server that publishes the registry to nodes after
+  every enrollment; CLI.
+- `cv-client`: `Device` (secret, enrollment, guard slot), `ParticipantClient`
+  (enroll over HTTP, cast, confirm-until-anchored, support, create initiative,
+  result, receipt code); CLI `cv-client` with init/enroll/votes/vote/status/
+  result/initiative/initiatives/support.
+- Test (lifecycle, 35 s): 12 enrollments incl. one replacement → authority
+  vote → 10 ballots cast through the client and confirmed under dev anchors →
+  double vote drops both → byte-identical retransmission deduplicated →
+  result with the expected counts → below-minimum vote → initiative with two
+  supports reaches threshold → node derives the vote (open = deadline + 144,
+  Yes/No, min_ballots 100) → 4 ballots on it → below_minimum with 4 counted.

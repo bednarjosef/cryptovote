@@ -3,4 +3,6 @@
 //! UniFFI bindings (Phase 7).
 #![forbid(unsafe_code)]
 
+pub mod device;
 pub mod light;
+pub mod participant;

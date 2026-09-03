@@ -941,10 +941,13 @@ name = "cv-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ark-ff",
  "clap",
  "cv-core",
  "cv-crypto",
  "hex",
+ "rand 0.8.8",
+ "rand_chacha",
  "reqwest",
  "serde",
  "serde_json",
@@ -999,9 +1002,19 @@ name = "cv-issuer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
+ "cv-client",
  "cv-core",
  "cv-crypto",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1028,6 +1041,7 @@ dependencies = [
  "cv-client",
  "cv-core",
  "cv-crypto",
+ "cv-issuer",
  "cv-log",
  "hex",
  "opentimestamps",

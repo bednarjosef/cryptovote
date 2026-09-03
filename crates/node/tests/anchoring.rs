@@ -309,9 +309,10 @@ async fn ots_anchorer_submits_upgrades_verifies_and_publishes() {
         .try_into()
         .unwrap();
     let item = client.item(&anchor_id).await.unwrap().unwrap();
-    let log = h.node.log.lock().unwrap();
-    assert_eq!(cv_core::validate::validate(&item, &*log), Ok(()));
-    drop(log);
+    {
+        let log = h.node.log.lock().unwrap();
+        assert_eq!(cv_core::validate::validate(&item, &*log), Ok(()));
+    }
 
     h.shutdown().await;
     cal_task.abort();
