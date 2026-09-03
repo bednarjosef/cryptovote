@@ -176,6 +176,16 @@ impl NodeClient {
             .await?)
     }
 
+    pub async fn nodes(&self) -> Result<Vec<NodeSummary>, ClientError> {
+        Ok(self
+            .http
+            .get(format!("{}/v1/nodes", self.base))
+            .send()
+            .await?
+            .json()
+            .await?)
+    }
+
     pub async fn anchors(&self) -> Result<Vec<AnchorSummary>, ClientError> {
         Ok(self
             .http

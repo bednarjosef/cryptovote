@@ -15,6 +15,11 @@ path = "src/lib.rs"
 name = "cv-client"
 path = "src/main.rs"
 
+[features]
+default = ["tor", "ffi"]
+tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+ffi = ["dep:uniffi"]
+
 [dependencies]
 cv-core.workspace = true
 cv-crypto.workspace = true
@@ -29,3 +34,9 @@ tokio.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 ark-ff.workspace = true
+arti-client = { workspace = true, optional = true }
+tor-rtcompat = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+uniffi = { workspace = true, optional = true }

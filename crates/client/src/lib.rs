@@ -4,5 +4,13 @@
 #![forbid(unsafe_code)]
 
 pub mod device;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 pub mod light;
+pub mod mix;
 pub mod participant;
+#[cfg(feature = "tor")]
+pub mod tor;
+
+#[cfg(feature = "ffi")]
+uniffi::setup_scaffolding!();

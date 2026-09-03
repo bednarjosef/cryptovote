@@ -28,6 +28,8 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/votes/{id}/ballots", get(vote_ballots))
         .route("/v1/votes/{id}/result", get(vote_result))
         .route("/v1/initiatives", get(initiatives))
+        .route("/v1/nodes", get(nodes))
+        .route("/v1/mix", post(mix_submit))
         .route("/v1/votes/{id}/nullifier/{n}", get(nullifier_status))
         .route("/v1/anchors", get(anchors))
         .route("/v1/anchors/{id}/proof/{cid}", get(anchor_proof))
@@ -363,4 +365,39 @@ async fn initiatives(State(node): State<Arc<Node>>) -> Json<Vec<InitiativeSummar
         .collect();
     out.sort_by(|a, b| a.initiative_id.cmp(&b.initiative_id));
     Json(out)
+}
+
+/// Valid, non-duplicated node registrations (for hop selection).
+async fn nodes(State(node): State<Arc<Node>>) -> Json<Vec<NodeSummary>> {
+    let log = node.log.lock().unwrap();
+    let mut out: Vec<NodeSummary> = log
+        .registered_node_ids()
+        .into_iter()
+        .filter_map(|id| match log.get(&id) {
+            Some(Item::NodeRegistration(r)) => {
+                cv_core::context::Context::node_registration(&*log, &r.node_key)
+            }
+            _ => None,
+        })
+        .map(|r| NodeSummary {
+            node_key: hex::encode(r.node_key),
+            mix_key: hex::encode(r.mix_key),
+            endpoint: r.endpoint.clone(),
+            operator: r.operator.clone(),
+            country: String::from_utf8_lossy(&r.country).into_owned(),
+            asn: r.asn,
+        })
+        .collect();
+    out.sort_by(|a, b| a.node_key.cmp(&b.node_key));
+    Json(out)
+}
+
+async fn mix_submit(State(node): State<Arc<Node>>, body: Bytes) -> Response {
+    match crate::mix::accept(&node, &body) {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(crate::mix::MixAcceptError::NotAHop) => {
+            (StatusCode::NOT_FOUND, "not a mix hop").into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
 }

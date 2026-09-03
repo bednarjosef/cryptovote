@@ -220,3 +220,31 @@ The class-group puzzle of the original Phase 3 no longer exists (BLOCKERS.md
   result with the expected counts → below-minimum vote → initiative with two
   supports reaches threshold → node derives the vote (open = deadline + 144,
   Yes/No, min_ballots 100) → 4 ballots on it → below_minimum with 4 counted.
+
+## Phase 7 — Mix and Tor  (2026-09-03)
+
+- `cv-crypto::mix`: Sphinx packets via Nym's `sphinx-packet` (fixed 2 KiB
+  payload, up to 5 hops), X25519 hop keys, decoy marker.
+- `cv-node::mix`: mix-hop role — peel one layer on arrival, persist the
+  result in the node store, adaptive hold `max(hold_min, k later arrivals)`
+  capped at `hold_cap`, shuffled forwarding to the next hop's endpoint
+  (resolved from the Log by node key), exit publishes payloads and drops
+  decoys; queue restored on restart. `POST /v1/mix`, `GET /v1/nodes`.
+- `cv-client::mix`: hop selection with diversity rules (distinct operator,
+  ASN, country), persistent guard with 90-day rotation stored on the device,
+  path shortening (3 → 2 → 1 → direct), dual-path send sharing the guard,
+  retry until the nullifier is anchored (fresh hops on each retry), decoys,
+  privacy indicator (`full` / `partial` / `DIRECT`, Tor or not) that never
+  degrades silently; status queries go through the same transport.
+- `cv-client::tor`: Arti-embedded Tor transport (bootstrap with timeout,
+  HTTP/1.1 over the Tor stream via hyper); failure falls back to direct and
+  is reported. Cargo feature `tor` (default on).
+- `cv-client::ffi`: UniFFI exports (`device_create`, `device_enroll`,
+  `cast_ballot`, `vote_result_json`). Feature `ffi` (default on).
+- Node CLI: `--mix-secret-seed`, hold parameters; `--witness-key-seed`.
+- Tests (4 mix scenarios + unit tests): ballot through **3 hops** on 5
+  nodes with two hop-disjoint paths, decoys dropped, guard persisted;
+  through **1 hop** when only one node is registered; a hop **crashing
+  mid-hold** (redb queue) forwards after restart on the same address;
+  **Tor unreachable** falls back to direct with the indicator saying so, and
+  with no registered hops at all the send is DIRECT.

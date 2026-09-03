@@ -276,4 +276,20 @@ bounds what a lying header source could do (a header at the wrong difficulty
 is rejected; a valid-but-stale chain only delays anchors). Nodes additionally
 wait for 6 confirmations before using a header.
 
+**A45 — Mix details not fixed by the whitepaper.** A hop's Sphinx address
+is its registered Ed25519 node key; a hop resolves the next address to an
+endpoint through its own Log, so routing needs no extra directory. The last
+hop of a path is the exit and submits the payload to its Log. Every packet
+has the same 2 KiB payload regardless of route length or item size; items
+larger than that (key-party registrations) go direct. Decoys are payloads
+starting with a fixed marker that exits drop silently. Status queries by
+nullifier go through the same transport as the ballot (Tor when available)
+so they do not link the voter's IP to the nullifier. Both paths of a
+dual-path send share the guard and are otherwise hop-disjoint when enough
+nodes exist. Node operators' `operator`, `country`, `asn` are self-declared
+(A29). The whitepaper's `max(3 s, 8 messages)` hold is implemented per
+message: forwarded once it is at least 3 s old *and* 8 later messages have
+arrived, or at 60 s regardless, in shuffled batches; the queue is persisted
+so a hop that crashes mid-hold forwards after restart.
+
 **A28 — Receipt** is 8 Crockford-base32 characters of `H_B("receipt"; n || c)`.

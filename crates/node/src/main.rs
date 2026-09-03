@@ -86,6 +86,16 @@ struct Args {
     /// Witness role: seed (hex) of this node's registered Ed25519 key.
     #[arg(long)]
     witness_key_seed: Option<String>,
+    /// Mix hop role: seed (hex) of this node's X25519 mix key (the public key goes in the NodeRegistration).
+    #[arg(long)]
+    mix_secret_seed: Option<String>,
+    /// Mix hold parameters (whitepaper §14): minimum seconds, other messages, cap seconds.
+    #[arg(long, default_value_t = 3)]
+    mix_hold_secs: u64,
+    #[arg(long, default_value_t = 8)]
+    mix_hold_messages: u64,
+    #[arg(long, default_value_t = 60)]
+    mix_hold_cap_secs: u64,
 }
 
 #[derive(Subcommand, Debug)]
@@ -286,6 +296,16 @@ async fn main() -> anyhow::Result<()> {
         args.calendars.clone()
     };
     let config = NodeConfig {
+        mix: cv_node::mix::MixConfig {
+            secret: match &args.mix_secret_seed {
+                Some(seed) => Some(cv_core::crypto::mix::MixSecret::from_seed(parse_key(seed)?)),
+                None => None,
+            },
+            hold_min: Duration::from_secs(args.mix_hold_secs),
+            hold_k: args.mix_hold_messages,
+            hold_cap: Duration::from_secs(args.mix_hold_cap_secs),
+            ..Default::default()
+        },
         witness_key: match &args.witness_key_seed {
             Some(seed) => Some(cv_core::crypto::sig::SigningKey::from_seed(&parse_key(
                 seed,

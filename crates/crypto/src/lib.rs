@@ -10,6 +10,7 @@ pub mod field;
 pub mod groth16;
 pub mod hash;
 pub mod merkle;
+pub mod mix;
 pub mod ots;
 pub mod poseidon;
 pub mod sig;

@@ -21,6 +21,7 @@ cv-crypto.workspace = true
 cv-log.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true

@@ -125,3 +125,13 @@ pub struct EnrollResponse {
     pub root: String,
     pub replaced: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeSummary {
+    pub node_key: String,
+    pub mix_key: String,
+    pub endpoint: String,
+    pub operator: String,
+    pub country: String,
+    pub asn: u32,
+}

@@ -69,8 +69,9 @@ a modular exponentiation is written here.
 | `reqwest` | 0.13 (`rustls` via aws-lc-rs) | 4, 5 | HTTP client (peers, OTS calendars over HTTPS, Esplora header API) |
 | `tokio` | 1.53 | 4 | Async runtime (required by axum, arti) |
 | `electrum-client` | 0.25 | 5 | Optional Bitcoin header source |
-| `arti-client`, `tor-rtcompat` | 0.46 | 7 | Embedded Tor (whitepaper §12) |
-| `uniffi` | 0.32 | 7 | iOS/Android bindings for the client library |
+| `arti-client`, `tor-rtcompat` | 0.46 (`tokio`, `rustls`) | 7 | Embedded Tor (whitepaper §12); bootstrap with a timeout, automatic fallback to direct HTTP reported in the privacy indicator |
+| `hyper`, `hyper-util`, `http-body-util` | 1.x / 0.1 / 0.1 | 7 | Plain HTTP/1.1 over an Arti `DataStream` (reqwest cannot use a custom stream) |
+| `uniffi` | 0.32 (proc-macros) | 7 | iOS/Android bindings for the client library (`cv-client` feature `ffi`, on by default; bindings generated with `uniffi-bindgen`) |
 | `wasm-bindgen` | 0.2 | 8 | Browser verifier |
 | `clap`, `serde`, `serde_json`, `thiserror`, `anyhow`, `hex`, `tracing` | current | 1+ | CLI, config files, errors, logging |
 

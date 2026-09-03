@@ -6,6 +6,7 @@ pub mod anchor;
 pub mod api;
 pub mod gossip;
 pub mod headers_http;
+pub mod mix;
 
 use cv_core::crypto::field::Fr;
 use cv_core::registry::RegistrySnapshot;
@@ -30,6 +31,7 @@ pub struct NodeConfig {
     /// Witness role (whitepaper §9 fallback): sign ballots of open votes
     /// with this registered node key.
     pub witness_key: Option<cv_core::crypto::sig::SigningKey>,
+    pub mix: mix::MixConfig,
 }
 
 impl Default for NodeConfig {
@@ -42,6 +44,7 @@ impl Default for NodeConfig {
             gossip_to_registered: false,
             anchor: anchor::AnchorConfig::default(),
             witness_key: None,
+            mix: mix::MixConfig::default(),
         }
     }
 }
@@ -54,6 +57,7 @@ pub struct Node {
     relay_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// Per-peer highest sequence number pulled so far.
     pub(crate) pull_state: Mutex<HashMap<String, u64>>,
+    pub mix_state: mix::MixState,
 }
 
 impl Node {
@@ -184,8 +188,10 @@ pub async fn start(config: NodeConfig, log: Log) -> anyhow::Result<NodeHandle> {
         peers: Mutex::new(config.peers.clone()),
         relay_tx,
         pull_state: Mutex::new(HashMap::new()),
+        mix_state: mix::MixState::default(),
         config: config.clone(),
     });
+    mix::restore(&node);
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let addr = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -216,14 +222,15 @@ pub async fn start(config: NodeConfig, log: Log) -> anyhow::Result<NodeHandle> {
     let anchorer = tokio::spawn(anchor::anchor_loop(
         node.clone(),
         config.anchor.clone(),
-        client,
-        shutdown_rx,
+        client.clone(),
+        shutdown_rx.clone(),
     ));
+    let mixer = tokio::spawn(mix::mix_loop(node.clone(), client, shutdown_rx));
     tracing::info!(node = %config.name, %addr, "node started");
     Ok(NodeHandle {
         addr,
         node,
         shutdown: shutdown_tx,
-        tasks: vec![server, push, pull, anchorer],
+        tasks: vec![server, push, pull, anchorer, mixer],
     })
 }
