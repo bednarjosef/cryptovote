@@ -273,3 +273,38 @@ The class-group puzzle of the original Phase 3 no longer exists (BLOCKERS.md
   anchor ignored, guarantee `anchored`; a witness-only snapshot yields the
   same counts labelled `FALLBACK`; malformed snapshots are rejected; vote
   filtering.
+
+## Phase 9 — Simulation and docs  (2026-09-03)
+
+- `cv-sim` (library + CLI): issuer, M nodes (full mesh, all mix hops, node 0
+  anchors), N participants enrolled and registered, authority vote through
+  the mix with a double voter and an abstainer, initiative → derived vote,
+  ballots on it, snapshot from the last node, independent verification,
+  comparison with ground truth; exit code 1 on mismatch.
+- `README.md`: layout, build/test, wasm build, simulation, running each
+  piece by hand in dev mode, release-mode requirements, mobile bindings.
+- Test: 10 participants, 5 nodes through the mix — the verifier's
+  recomputed counts equal the ground truth for the authority vote
+  (`anchored`) and the derived vote (`below_minimum` with the right count,
+  since derived votes need 100 ballots); every ballot went through 3 hops.
+
+## Status after Phase 9
+
+Implemented and tested: everything in the brief for `secrecy = none`.
+Test count: 54 (unit + integration), ~4 minutes total on this machine.
+
+Not implemented: Phase 10 — `secrecy = keyparties` (SPEC §10–§11): the
+verifiable timed commitment (`cv-vtc` crate: RSA-group RSW puzzles, proof of
+exponentiation, Shamir 33-of-64 cut-and-choose), Ristretto255 exponent
+ElGamal, KeyParty/Share validation, the node's solver role, the client's
+party selection and encryption, and `keyparties::decrypt` in the tally
+(currently returns `None`, so encrypted ballots would count as invalid).
+Types, wire formats, item validation stubs and the counting-rule structure
+for it are already in place.
+
+Known limitations worth stating: the issuer only has the mock eID backend;
+there is no CLI to sign authority vote definitions; the Groth16 setup used
+everywhere is the insecure dev one until a ceremony exists; the mix client
+is exercised only over direct HTTP in tests (Arti compiles and is wired, but
+Tor is not reachable from the test environment); UniFFI bindings are
+declared but not generated or compiled for a phone target here.

@@ -72,7 +72,7 @@ a modular exponentiation is written here.
 | `arti-client`, `tor-rtcompat` | 0.46 (`tokio`, `rustls`) | 7 | Embedded Tor (whitepaper §12); bootstrap with a timeout, automatic fallback to direct HTTP reported in the privacy indicator |
 | `hyper`, `hyper-util`, `http-body-util` | 1.x / 0.1 / 0.1 | 7 | Plain HTTP/1.1 over an Arti `DataStream` (reqwest cannot use a custom stream) |
 | `uniffi` | 0.32 (proc-macros) | 7 | iOS/Android bindings for the client library (`cv-client` feature `ffi`, on by default; bindings generated with `uniffi-bindgen`) |
-| `wasm-bindgen` | 0.2 | 8 | Browser verifier |
+| `wasm-bindgen` | 0.2 | 8 | Browser verifier (`cv-verifier` feature `wasm`); `getrandom` 0.2/0.3/0.4 get their wasm features enabled for the wasm32 target only |
 | `clap`, `serde`, `serde_json`, `thiserror`, `anyhow`, `hex`, `tracing` | current | 1+ | CLI, config files, errors, logging |
 
 ## Toolchain

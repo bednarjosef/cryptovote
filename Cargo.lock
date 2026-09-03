@@ -1539,8 +1539,16 @@ dependencies = [
  "cv-client",
  "cv-core",
  "cv-crypto",
+ "cv-issuer",
  "cv-log",
+ "cv-node",
  "cv-verifier",
+ "hex",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
