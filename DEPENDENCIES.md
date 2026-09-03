@@ -26,15 +26,16 @@ Versions are pinned in the workspace `Cargo.toml`.
 
 | Crate | Version | Used for | Why this one | Status |
 |---|---|---|---|---|
-| `curve25519-dalek` | 5.0.0 | Ristretto255 points and scalars for exponent ElGamal, share commitments, Lagrange interpolation | Already in the tree via `ed25519-dalek`; prime-order group; audited | Maintained (Jul 2026) |
-| `num-bigint`, `num-integer`, `num-traits` | 0.5 / 0.1 / 0.2 | 2048-bit modular arithmetic for RSW puzzles, the proof of exponentiation, and sequential squaring | The standard pure-Rust big integer crate; compiles to WASM | Maintained (Jul–Aug 2026) |
-| `crypto-primes` (with `crypto-bigint`) | 0.7.2 | Generating the party's 1024-bit primes; Miller–Rabin for `hash_to_prime` | Maintained by Entropy; used by `rsa` 0.10 and `class-groups`; constant-time | Maintained (Jun 2026) |
-| `rsa` | 0.9.10 | Alternative for modulus generation (`RsaPrivateKey::new` and `.primes()`) if `crypto-primes` integration proves awkward | RustCrypto, audited | Maintained (Apr 2026) |
+| `curve25519-dalek` | 5.0.0 | Ristretto255 points and scalars for exponent ElGamal, share commitments, Lagrange interpolation | Prime-order group; audited; no `rand_core` feature needed (scalars come from our own 64-byte samples) | Maintained (Jul 2026) |
+| `num-bigint-dig` (`prime` feature) | 0.9.1 | 2048-bit modular arithmetic, `gen_prime` (1024-bit primes), Miller–Rabin `probably_prime` for `hash_to_prime`, `mod_inverse`, sequential squaring | The big-integer crate the `rsa` crate is built on; has prime generation and primality testing built in; pure Rust | Maintained (Nov 2025). Uses rand 0.9; a small RNG adapter bridges the workspace's rand 0.8 |
+| `num-traits`, `num-integer` | 0.2 / 0.1 | Traits for the above | — | Maintained |
+| `rand` 0.9 (as `rand09`) | 0.9 | Only the `RngCore`/`CryptoRng` traits for the adapter above | — | Maintained |
 | `chacha20poly1305` | 0.11.0 | AEAD of puzzle shares | Already used | — |
 
-The VTC construction itself (SPEC §10) is assembled from these crates under
-the explicit Rule 1 carve-out; nothing lower-level than a group operation or
-a modular exponentiation is written here.
+The VTC construction itself (SPEC §10) lives in `crates/vtc` (`cv-vtc`) and is
+assembled from these crates under the explicit Rule 1 carve-out; nothing
+lower-level than a group operation, a modular exponentiation or a primality
+test is written there. It must be audited before binding use.
 
 ## No longer needed
 

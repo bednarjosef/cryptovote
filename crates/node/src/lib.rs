@@ -7,6 +7,7 @@ pub mod api;
 pub mod gossip;
 pub mod headers_http;
 pub mod mix;
+pub mod solver;
 
 use cv_core::crypto::field::Fr;
 use cv_core::registry::RegistrySnapshot;
@@ -32,6 +33,7 @@ pub struct NodeConfig {
     /// with this registered node key.
     pub witness_key: Option<cv_core::crypto::sig::SigningKey>,
     pub mix: mix::MixConfig,
+    pub solver: solver::SolverConfig,
 }
 
 impl Default for NodeConfig {
@@ -45,6 +47,7 @@ impl Default for NodeConfig {
             anchor: anchor::AnchorConfig::default(),
             witness_key: None,
             mix: mix::MixConfig::default(),
+            solver: solver::SolverConfig::default(),
         }
     }
 }
@@ -225,12 +228,17 @@ pub async fn start(config: NodeConfig, log: Log) -> anyhow::Result<NodeHandle> {
         client.clone(),
         shutdown_rx.clone(),
     ));
-    let mixer = tokio::spawn(mix::mix_loop(node.clone(), client, shutdown_rx));
+    let mixer = tokio::spawn(mix::mix_loop(node.clone(), client, shutdown_rx.clone()));
+    let solver = tokio::spawn(solver::solver_loop(
+        node.clone(),
+        config.solver.clone(),
+        shutdown_rx,
+    ));
     tracing::info!(node = %config.name, %addr, "node started");
     Ok(NodeHandle {
         addr,
         node,
         shutdown: shutdown_tx,
-        tasks: vec![server, push, pull, anchorer, mixer],
+        tasks: vec![server, push, pull, anchorer, mixer, solver],
     })
 }

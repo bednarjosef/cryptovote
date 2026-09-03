@@ -176,6 +176,20 @@ impl NodeClient {
             .await?)
     }
 
+    pub async fn keyparties(&self, vote_id: &Id) -> Result<Vec<KeyPartySummary>, ClientError> {
+        Ok(self
+            .http
+            .get(format!(
+                "{}/v1/votes/{}/keyparties",
+                self.base,
+                hex::encode(vote_id)
+            ))
+            .send()
+            .await?
+            .json()
+            .await?)
+    }
+
     pub async fn nodes(&self) -> Result<Vec<NodeSummary>, ClientError> {
         Ok(self
             .http

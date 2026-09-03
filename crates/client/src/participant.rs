@@ -36,11 +36,17 @@ pub enum ParticipantError {
 pub struct ParticipantClient {
     pub node: NodeClient,
     pub keys: Arc<MembershipKeys>,
+    /// Dev mode relaxes the key-party delay requirement (SPEC §10.4).
+    pub dev: bool,
 }
 
 impl ParticipantClient {
     pub fn new(node: NodeClient, keys: Arc<MembershipKeys>) -> Self {
-        ParticipantClient { node, keys }
+        ParticipantClient {
+            node,
+            keys,
+            dev: false,
+        }
     }
 
     /// Enroll with an issuer over HTTP (mock eID in dev).
@@ -113,7 +119,7 @@ impl ParticipantClient {
             .await?
             .ok_or(ParticipantError::UnknownVote)?;
         let p = self.participant(device, &vd.registry_root).await?;
-        let ballot = plaintext_ballot(&self.keys, &p, &vd, option)?;
+        let ballot = prepare_ballot(&self.node, &self.keys, &p, &vd, option, self.dev).await?;
         let resp = Self::check(self.node.submit_item(&Item::Ballot(ballot.clone())).await?)?;
         Ok((ballot, resp))
     }
@@ -222,4 +228,103 @@ fn crockford(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// Key parties a client encrypts to (SPEC §11.1): listed by the node after
+/// the duplicate rule, anchored before `open_block`, with a sufficient delay
+/// (relaxed in dev mode), at most `MAX_KEY_PARTIES`.
+pub async fn select_parties(
+    node: &NodeClient,
+    vd: &VoteDefinition,
+    dev: bool,
+) -> Result<Vec<(Id, [u8; 32])>, ParticipantError> {
+    let mut out: Vec<(Id, [u8; 32])> = Vec::new();
+    for k in node.keyparties(&vd.vote_id()).await? {
+        let Some(h) = k.anchored_height else { continue };
+        if h >= vd.open_block {
+            continue;
+        }
+        if !dev && k.delay_t < cv_core::constants::required_delay(vd.close_block.saturating_sub(h))
+        {
+            continue;
+        }
+        let (Ok(id), Ok(pk)) = (hex::decode(&k.keyparty_id), hex::decode(&k.pk)) else {
+            continue;
+        };
+        let (Ok(id), Ok(pk)): (Result<Id, _>, Result<[u8; 32], _>) = (id.try_into(), pk.try_into())
+        else {
+            continue;
+        };
+        out.push((id, pk));
+    }
+    out.sort();
+    out.truncate(cv_core::constants::MAX_KEY_PARTIES);
+    Ok(out)
+}
+
+/// Build the ballot for either secrecy mode.
+pub async fn prepare_ballot(
+    node: &NodeClient,
+    keys: &MembershipKeys,
+    p: &Participant,
+    vd: &VoteDefinition,
+    option: u8,
+    dev: bool,
+) -> Result<Ballot, ParticipantError> {
+    Ok(match vd.secrecy {
+        Secrecy::None => plaintext_ballot(keys, p, vd, option)?,
+        Secrecy::KeyParties => {
+            let parties = select_parties(node, vd, dev).await?;
+            keyparties_ballot(keys, p, vd, &parties, option)?
+        }
+    })
+}
+
+impl ParticipantClient {
+    /// Register as a key party for a vote (SPEC §6.6); the secret share is
+    /// kept on the device until `publish_share`.
+    pub async fn register_keyparty(
+        &self,
+        device: &mut Device,
+        vote_id: &Id,
+        delay_t: u64,
+    ) -> Result<(KeyParty, SubmitResponse), ParticipantError> {
+        let vd = self
+            .node
+            .vote(vote_id)
+            .await?
+            .ok_or(ParticipantError::UnknownVote)?;
+        let p = self.participant(device, &vd.registry_root).await?;
+        let (kp, sk) = build_keyparty(&self.keys, &p, vote_id, delay_t, &mut rand::rngs::OsRng)?;
+        let resp = Self::check(self.node.submit_item(&Item::KeyParty(kp.clone())).await?)?;
+        device
+            .keyparty_secrets
+            .insert(hex::encode(vote_id), hex::encode(sk));
+        Ok((kp, resp))
+    }
+
+    /// Publish this device's share for a vote (after close, SPEC §10.5).
+    pub async fn publish_share(
+        &self,
+        device: &Device,
+        vote_id: &Id,
+        keyparty_id: &Id,
+    ) -> Result<SubmitResponse, ParticipantError> {
+        let sk_hex = device.keyparty_secrets.get(&hex::encode(vote_id)).ok_or(
+            ParticipantError::Rejected("no key-party secret for this vote".into()),
+        )?;
+        let sk: [u8; 32] = hex::decode(sk_hex)
+            .ok()
+            .and_then(|v| v.try_into().ok())
+            .ok_or(ParticipantError::Rejected("bad stored secret".into()))?;
+        Self::check(
+            self.node
+                .submit_item(&Item::Share(Share {
+                    vote_id: *vote_id,
+                    keyparty_id: *keyparty_id,
+                    sk,
+                }))
+                .await?,
+        )
+    }
 }

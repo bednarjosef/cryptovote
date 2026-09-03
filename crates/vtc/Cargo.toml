@@ -1,0 +1,23 @@
+[package]
+name = "cv-vtc"
+description = "secrecy = keyparties: exponent ElGamal on Ristretto255 and the verifiable timed commitment (SPEC §10–§11). The only construction in the workspace assembled from primitive crates (Hard rule 1 carve-out)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cv-crypto.workspace = true
+blake3.workspace = true
+curve25519-dalek.workspace = true
+num-bigint-dig.workspace = true
+num-traits.workspace = true
+num-integer.workspace = true
+rand.workspace = true
+rand09.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rand_chacha.workspace = true
+hex.workspace = true

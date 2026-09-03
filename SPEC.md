@@ -488,7 +488,7 @@ Validity:
 
 - [ ] Referenced VoteDefinition exists, is valid, and has `secrecy = keyparties`.
 - [ ] `registry_root == vote.registry_root`.
-- [ ] `delay_T ≤ T_CAP`; `modulus` is odd, `2^2047 < N < 2^2048`; `g, h, poe ∈ [2, N−1]`.
+- [ ] `delay_T ≤ T_CAP`; `modulus` is odd, `2^2047 < N < 2^2048`; `g, h ∈ [2, N−1]`, `poe ∈ [1, N−1]` (`π = 1` is the correct proof when `2^T < l`).
 - [ ] VTC verification of §10.3 passes (proof of exponentiation, challenge set, openings, Lagrange consistency).
 - [ ] `proof` verifies with `[registry_root, nullifier, tag("keyparty"), fr_mod(vote_id), fr_mod(keyparty_id)]`.
 - Duplicates: §7.1 on `nullifier` — one key party per person per vote; a differing duplicate removes both from **client selection** (§11.1) but does not affect decryption of ballots that already declared them (A38).

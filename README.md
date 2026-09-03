@@ -7,11 +7,13 @@ independent verifier. `SPEC.md` is the byte-exact specification; every
 deviation from the whitepaper is recorded in `ASSUMPTIONS.md`; crate choices
 in `DEPENDENCIES.md`; progress per phase in `PROGRESS.md`.
 
-**Status.** Phases 0–9 are implemented and tested under `secrecy = none`
-(plaintext option index, public running count). `secrecy = keyparties`
-(SPEC §10–§11: EC-ElGamal under an aggregate key with verifiable timed
-commitments) is specified and wired into the types and the counting rule but
-its cryptography (Phase 10) is not implemented yet.
+**Status.** Phases 0–10 are implemented and tested: `secrecy = none`
+(plaintext option index, public running count) and `secrecy = keyparties`
+(SPEC §10–§11: EC-ElGamal under the aggregate key of volunteer key parties,
+each committing to its share with a verifiable timed commitment that anyone
+can force open). The VTC construction in `crates/vtc` is the only
+cryptographic construction assembled here from primitive crates; it must be
+audited before any binding use.
 
 Everything you can run today is **development mode**: a mock Bitcoin clock,
 an insecure Groth16 setup derived from a public seed, a mock eID issuer that
@@ -30,6 +32,7 @@ that way. Nothing produced in dev mode is trustworthy.
 | `crates/verifier` | `cv-verifier` | Small verifier: CLI and WebAssembly. |
 | `crates/issuer` | `cv-issuer` | Issuer with a mock eID backend (dev). |
 | `crates/sim` | `cv-sim` | End-to-end simulation on one machine. |
+| `crates/vtc` (`cv-vtc`) | — | `secrecy = keyparties`: exponent ElGamal on Ristretto255, RSW puzzles with proof of exponentiation, Shamir cut-and-choose timed commitment. |
 
 ## Build and test
 
@@ -81,8 +84,10 @@ curl -s http://127.0.0.1:8440/v1/snapshot > log.snap
 cargo run --release -p cv-verifier -- --dev --snapshot log.snap --issuer-key <ISSUER_KEY_HEX> --authority-key <AUTHORITY_KEY_HEX>
 ```
 
-Vote definitions are created by signing with an authority key; there is no
-CLI for that yet (the simulation and tests use `cv_core::build::sign_vote_definition`).
+Key parties: `ParticipantClient::register_keyparty` (before `open_block`)
+and `publish_share` (after close); nodes started with `--solver` force open
+any commitment whose share has not appeared. Vote definitions are created
+by signing with an authority key; there is no CLI for that yet (the simulation and tests use `cv_core::build::sign_vote_definition`).
 Initiatives are created with `cv-client initiative` and supported with
 `cv-client support`; a node derives the vote automatically once the threshold
 of anchored supports is reached.

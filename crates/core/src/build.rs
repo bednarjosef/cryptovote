@@ -171,3 +171,79 @@ pub fn build_witness(node: &SigningKey, content_id: Id, vote_id: Id) -> Witness 
         signature: node.sign(Domain::Witness, &payload),
     }
 }
+
+/// Register as a key party (SPEC §6.6): generates the party's modulus, the
+/// ElGamal key pair and the timed commitment. Returns the item and the
+/// secret `sk` the party must keep to publish its share after close.
+pub fn build_keyparty<R: rand::RngCore + rand::CryptoRng>(
+    keys: &MembershipKeys,
+    p: &Participant,
+    vote_id: &Id,
+    delay_t: u64,
+    rng: &mut R,
+) -> Result<(KeyParty, [u8; 32]), Unsatisfiable> {
+    let (pubp, _secret) = cv_vtc::generate_party(rng, delay_t);
+    let (sk, pk) = cv_vtc::keygen(rng);
+    let c = cv_vtc::commit(&sk, vote_id, &pubp, rng);
+    let big = |x: &cv_vtc::BigUint| Box::new(cv_vtc::bigint256(x).expect("2048-bit values fit"));
+    let n = nullifier(&p.secret, TAG_KEYPARTY, &cv_crypto::field::fr_mod(vote_id));
+    let mut kp = KeyParty {
+        vote_id: *vote_id,
+        pk: cv_vtc::point_to_bytes(&pk),
+        modulus: big(&pubp.n),
+        g: big(&pubp.g),
+        h: big(&pubp.h),
+        poe: big(&pubp.poe),
+        delay_t,
+        share_commitments: c.share_commitments,
+        puzzles: c
+            .puzzles
+            .iter()
+            .map(|z| Puzzle {
+                u: big(&z.u),
+                ct: z.ct,
+            })
+            .collect(),
+        openings: c
+            .openings
+            .iter()
+            .map(|o| Opening {
+                share: o.share,
+                r: big(&o.r),
+            })
+            .collect(),
+        registry_root: p.registry_root,
+        nullifier: n,
+        proof: ZERO_PROOF,
+    };
+    let content_id = kp.content_id();
+    let stmt =
+        MembershipStatement::new(p.registry_root, n, TAG_KEYPARTY, Some(vote_id), &content_id);
+    kp.proof = prove_membership(keys, &stmt, &p.witness(), &content_id)?;
+    Ok((kp, sk.to_bytes()))
+}
+
+/// Encrypted ballot for a `keyparties` vote (SPEC §6.4, §11.2).
+pub fn keyparties_ballot(
+    keys: &MembershipKeys,
+    p: &Participant,
+    vote: &VoteDefinition,
+    parties: &[(Id, [u8; 32])],
+    option: u8,
+) -> Result<Ballot, Unsatisfiable> {
+    let mut parties: Vec<(Id, [u8; 32])> = parties.to_vec();
+    parties.sort();
+    parties.dedup_by(|a, b| a.0 == b.0);
+    let vote_id = vote.vote_id();
+    let r = crate::keyparties::ballot_randomness(&p.secret, &vote_id);
+    let pks: Vec<[u8; 32]> = parties.iter().map(|x| x.1).collect();
+    let (c1, c2) =
+        crate::keyparties::encrypt_option(&pks, option, &r).expect("party keys were validated");
+    let payload = KeyPartiesPayload {
+        party_ids: parties.iter().map(|x| x.0).collect(),
+        c1,
+        c2,
+    }
+    .encode();
+    build_ballot(keys, p, vote, payload)
+}

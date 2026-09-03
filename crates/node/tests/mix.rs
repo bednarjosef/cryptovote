@@ -92,6 +92,7 @@ fn device(f: &Fixture, i: usize) -> Device {
         enrollment: None,
         guard: None,
         guard_since_unix: None,
+        keyparty_secrets: Default::default(),
     }
 }
 

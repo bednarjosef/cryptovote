@@ -135,3 +135,12 @@ pub struct NodeSummary {
     pub country: String,
     pub asn: u32,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyPartySummary {
+    pub keyparty_id: String,
+    pub pk: String,
+    pub delay_t: u64,
+    pub anchored_height: Option<u32>,
+    pub has_share: bool,
+}

@@ -5,7 +5,8 @@
 
 use crate::device::Device;
 use crate::light::NodeClient;
-use cv_core::build::{Participant, plaintext_ballot};
+use crate::participant::prepare_ballot;
+use cv_core::build::Participant;
 use cv_core::crypto::field::{Fr, fr_to_bytes};
 use cv_core::crypto::groth16::MembershipKeys;
 use cv_core::crypto::mix::{Hop, MAX_MESSAGE_LEN, build_packet, decoy_payload};
@@ -176,6 +177,7 @@ pub struct MixClient {
     pub tor_error: Option<String>,
     pub hops_per_path: usize,
     pub paths: usize,
+    pub dev: bool,
 }
 
 impl MixClient {
@@ -200,6 +202,7 @@ impl MixClient {
             tor_error,
             hops_per_path: cv_core::constants::MIX_HOPS,
             paths: cv_core::constants::PATHS_PER_BALLOT,
+            dev: false,
         }
     }
 
@@ -353,7 +356,7 @@ impl MixClient {
         let p: Participant = device
             .participant(&leaves)
             .ok_or_else(|| anyhow::anyhow!("device not enrolled in this registry"))?;
-        let ballot = plaintext_ballot(keys, &p, &vd, option)?;
+        let ballot = prepare_ballot(&self.node, keys, &p, &vd, option, self.dev).await?;
         let bytes = Item::Ballot(ballot.clone()).encode();
         let mut exclude: Vec<[u8; 32]> = Vec::new();
         let mut last_privacy = PrivacyLevel {

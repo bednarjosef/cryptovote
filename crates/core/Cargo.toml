@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 cv-crypto.workspace = true
+cv-vtc.workspace = true
 thiserror.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true

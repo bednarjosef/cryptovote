@@ -9,6 +9,7 @@ members = [
     "crates/verifier",
     "crates/issuer",
     "crates/sim",
+    "crates/vtc",
 ]
 
 [workspace.package]
@@ -27,6 +28,7 @@ cv-log = { path = "crates/log" }
 cv-node = { path = "crates/node" }
 cv-client = { path = "crates/client" }
 cv-verifier = { path = "crates/verifier" }
+cv-vtc = { path = "crates/vtc" }
 
 # --- cryptographic primitives (Hard rule 1: never implemented here) ---
 blake3 = "1.8"
@@ -49,6 +51,11 @@ opentimestamps = "0.2"
 sphinx-packet = "0.7"
 rand = "0.8"
 rand_chacha = "0.3"
+num-bigint-dig = { version = "0.9", features = ["prime"] }
+rand09 = { package = "rand", version = "0.9" }
+num-traits = "0.2"
+num-integer = "0.1"
+curve25519-dalek = "5"
 
 # --- infrastructure ---
 redb = "4"

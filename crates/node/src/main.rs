@@ -96,6 +96,11 @@ struct Args {
     mix_hold_messages: u64,
     #[arg(long, default_value_t = 60)]
     mix_hold_cap_secs: u64,
+    /// Solver role: force open key-party commitments (one sequential job per party).
+    #[arg(long)]
+    solver: bool,
+    #[arg(long, default_value_t = 2)]
+    solver_parallel: usize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -296,6 +301,11 @@ async fn main() -> anyhow::Result<()> {
         args.calendars.clone()
     };
     let config = NodeConfig {
+        solver: cv_node::solver::SolverConfig {
+            enabled: args.solver,
+            parallel: args.solver_parallel,
+            ..Default::default()
+        },
         mix: cv_node::mix::MixConfig {
             secret: match &args.mix_secret_seed {
                 Some(seed) => Some(cv_core::crypto::mix::MixSecret::from_seed(parse_key(seed)?)),

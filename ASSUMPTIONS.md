@@ -292,4 +292,18 @@ message: forwarded once it is at least 3 s old *and* 8 later messages have
 arrived, or at 60 s regardless, in shuffled batches; the queue is persisted
 so a hop that crashes mid-hold forwards after restart.
 
+**A46 — Key-party implementation details.** Registration generates two
+1024-bit primes and 64 puzzles (about 8 s per party on this machine in a
+dev build); the party's `φ` is discarded after the commitment. The proof of
+exponentiation is `π = 1` when `2^T < l` (dev delays), so the structural
+check admits `π ∈ [1, N−1]`. The node's solver role starts one sequential
+job per party as soon as the registration is on the Log (whitepaper §10
+"solvers start at once"), bounded by `--solver-parallel`; the reference
+solver uses `num-bigint-dig` squarings (≈ 10⁵–10⁶ per second), so real
+delays sized for `S_MAX_RSA = 2^26` take far longer than the vote — which is
+the design: voluntary publication after close is the normal path. The
+client relaxes the delay requirement only in dev mode (`ParticipantClient::dev`).
+A ballot cast when no party is listed encrypts to the identity key
+(plaintext-equivalent) and the payload still carries an empty party list.
+
 **A28 — Receipt** is 8 Crockford-base32 characters of `H_B("receipt"; n || c)`.

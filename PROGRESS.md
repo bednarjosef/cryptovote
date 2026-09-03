@@ -308,3 +308,38 @@ everywhere is the insecure dev one until a ceremony exists; the mix client
 is exercised only over direct HTTP in tests (Arti compiles and is wired, but
 Tor is not reachable from the test environment); UniFFI bindings are
 declared but not generated or compiled for a phone target here.
+
+## Phase 10 — secrecy = keyparties  (2026-09-03)
+
+- `cv-vtc` (new crate, the Rule 1 carve-out): exponent ElGamal on
+  Ristretto255 with aggregate keys; party parameters (two 1024-bit primes,
+  `g = x²`, `h = g^(2^T)` via the trapdoor) and the Wesolowski proof of
+  exponentiation; RSW puzzles of 32-byte shares (AEAD under `blake3(y)`,
+  opening by `r` or by `T` squarings); Shamir 33-of-64 sharing, Fiat–Shamir
+  challenge set from a BLAKE3 XOF, commitment, verification (PoE, openings,
+  Lagrange consistency of every unopened share with `pk`), forced opening.
+  SPEC §10.6 deviations unchanged; one spec correction: `π = 1` is the valid
+  proof when `2^T < l`.
+- `cv-core`: full `KeyParty` and `Share` validation, ciphertext point
+  canonicity, `keyparties::decrypt` in the tally, `build_keyparty`,
+  `keyparties_ballot`, deterministic ElGamal randomness from `s`.
+- `cv-client`: `register_keyparty` (secret kept on the device),
+  `publish_share`, party selection per SPEC §11.1 (anchored before open,
+  sufficient delay unless dev), encrypted casting in both the direct and mix
+  paths. `cv-node`: `GET /v1/votes/{id}/keyparties`, solver role
+  (`--solver`, `--solver-parallel`).
+- Tests (cv-vtc unit: ElGamal, Shamir, PoE, puzzle, commit/verify/force;
+  node lifecycle): two parties register and are anchored before open; a
+  tampered registration is rejected; encrypted ballots are byte-identical on
+  re-cast; `not_closed` before close; `pending` with two missing shares after
+  close; one voluntary share; a wrong share rejected; the solver forces the
+  other open (15 ms at T = 64); result [1, 0, 2] with the double voter
+  excluded; the verifier recomputes the same from a snapshot.
+
+## Status after Phase 10
+
+Everything in the brief and the user's key-party design is implemented
+under both secrecy modes. Test count: 60, all passing, clippy clean. Remaining known limitations are
+listed above (mock eID only, no authority CLI, dev Groth16 setup, Tor not
+exercised in tests, UniFFI bindings not generated here) plus: the reference
+solver is pure Rust and slow for production delays; `cv-vtc` is unaudited.

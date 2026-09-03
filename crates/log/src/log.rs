@@ -544,6 +544,18 @@ impl Log {
             .unwrap_or_default()
     }
 
+    /// Every key party on the Log with its vote (for the solver role).
+    pub fn all_keyparties(&self) -> Vec<&KeyParty> {
+        self.by_vote
+            .values()
+            .flat_map(|v| v.keyparties.iter())
+            .filter_map(|id| match self.items.get(id) {
+                Some(Item::KeyParty(k)) => Some(k),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn shares_of(&self, keyparty_id: &Id) -> Vec<&Share> {
         self.shares_by_keyparty
             .get(keyparty_id)

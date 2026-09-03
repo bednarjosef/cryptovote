@@ -22,7 +22,29 @@ use cv_node::{NodeConfig, start};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Wait until this exact ballot (by content id) is anchored, not merely any
+/// ballot under the same nullifier.
+async fn wait_ballot_anchored(client: &NodeClient, vote_id: &Id, ballot: &Ballot) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let cid = hex::encode(ballot.content_id());
+    loop {
+        let st = client
+            .ballot_status(vote_id, &ballot.nullifier)
+            .await
+            .unwrap();
+        if let Some(h) = st
+            .iter()
+            .find(|s| s.content_id == cid)
+            .and_then(|s| s.anchored_height)
+        {
+            return h;
+        }
+        assert!(Instant::now() < deadline, "ballot {cid} never anchored");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn full_lifecycle_in_dev_mode() {
@@ -140,10 +162,7 @@ async fn full_lifecycle_in_dev_mode() {
     // Person 3 (who voted option 0) votes again with a different option: double action.
     let (dup, resp) = pc.cast(&devices[3], &vid, 1).await.unwrap();
     assert!(matches!(resp, SubmitResponse::New { .. }));
-    pc.confirm(&vid, &dup.nullifier, Duration::from_secs(20))
-        .await
-        .unwrap()
-        .unwrap();
+    wait_ballot_anchored(&pc.node, &vid, &dup).await;
     expected[0] -= 1;
     // A retransmission is byte-identical and deduplicated.
     let (_, resp) = pc.cast(&devices[4], &vid, 1).await.unwrap();

@@ -27,6 +27,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/votes", get(votes))
         .route("/v1/votes/{id}/ballots", get(vote_ballots))
         .route("/v1/votes/{id}/result", get(vote_result))
+        .route("/v1/votes/{id}/keyparties", get(vote_keyparties))
         .route("/v1/initiatives", get(initiatives))
         .route("/v1/nodes", get(nodes))
         .route("/v1/mix", post(mix_submit))
@@ -400,4 +401,34 @@ async fn mix_submit(State(node): State<Arc<Node>>, body: Bytes) -> Response {
         }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
+}
+
+/// Key parties of a vote after the duplicate rule (SPEC §7.1), with their
+/// anchoring height and whether a share is known.
+async fn vote_keyparties(State(node): State<Arc<Node>>, Path(id): Path<String>) -> Response {
+    let Some(id) = parse_id(&id) else {
+        return not_found();
+    };
+    let log = node.log.lock().unwrap();
+    let all: Vec<KeyParty> = log.keyparties_of(&id).into_iter().cloned().collect();
+    let unique = cv_core::tally::unique_by_nullifier(
+        &all,
+        |k| fr_to_bytes(&k.nullifier),
+        |k| k.content_id(),
+    );
+    let mut out: Vec<KeyPartySummary> = unique
+        .iter()
+        .map(|k| {
+            let cid = k.content_id();
+            KeyPartySummary {
+                keyparty_id: hex::encode(cid),
+                pk: hex::encode(k.pk),
+                delay_t: k.delay_t,
+                anchored_height: log.anchored_height(&cid),
+                has_share: !log.shares_of(&cid).is_empty(),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.keyparty_id.cmp(&b.keyparty_id));
+    Json(out).into_response()
 }

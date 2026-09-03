@@ -36,5 +36,6 @@ opentimestamps.workspace = true
 
 [dev-dependencies]
 cv-client.workspace = true
+cv-verifier.workspace = true
 cv-issuer = { path = "../issuer" }
 tempfile.workspace = true

@@ -24,6 +24,9 @@ struct Stored {
     /// Guard node kept for months (whitepaper §12), Phase 7.
     guard: Option<String>,
     guard_since_unix: Option<u64>,
+    /// vote id (hex) → key-party secret (hex), kept until the share is published.
+    #[serde(default)]
+    keyparty_secrets: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +35,7 @@ pub struct Device {
     pub enrollment: Option<Enrollment>,
     pub guard: Option<String>,
     pub guard_since_unix: Option<u64>,
+    pub keyparty_secrets: std::collections::BTreeMap<String, String>,
 }
 
 impl Device {
@@ -46,6 +50,7 @@ impl Device {
             enrollment: None,
             guard: None,
             guard_since_unix: None,
+            keyparty_secrets: Default::default(),
         }
     }
 
@@ -65,6 +70,7 @@ impl Device {
             enrollment: st.enrollment,
             guard: st.guard,
             guard_since_unix: st.guard_since_unix,
+            keyparty_secrets: st.keyparty_secrets,
         })
     }
 
@@ -74,6 +80,7 @@ impl Device {
             enrollment: self.enrollment.clone(),
             guard: self.guard.clone(),
             guard_since_unix: self.guard_since_unix,
+            keyparty_secrets: self.keyparty_secrets.clone(),
         };
         std::fs::write(path, serde_json::to_vec_pretty(&st)?)?;
         Ok(())

@@ -5,6 +5,7 @@
 //! (Phase 10).
 #![forbid(unsafe_code)]
 
+pub mod aead;
 pub mod circuit;
 pub mod field;
 pub mod groth16;

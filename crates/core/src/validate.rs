@@ -33,8 +33,8 @@ pub enum Invalid {
     BadAnchorProof,
     #[error("anchor proof is not yet in Bitcoin (pending calendar attestation)")]
     Unverified,
-    #[error("not implemented in this phase: {0}")]
-    NotImplemented(&'static str),
+    #[error("key party commitment: {0}")]
+    KeyParty(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -224,7 +224,11 @@ pub fn validate_ballot(v: &Ballot, ctx: &impl Context) -> Result<(), Invalid> {
                     return Err(Invalid::Structure("key party belongs to another vote"));
                 }
             }
-            // Point canonicity is checked in Phase 10 (`crypto::elgamal`).
+            if cv_vtc::point_from_bytes(&p.c1).is_none()
+                || cv_vtc::point_from_bytes(&p.c2).is_none()
+            {
+                return Err(Invalid::Structure("non-canonical ciphertext point"));
+            }
         }
     }
     check_membership(
@@ -285,7 +289,7 @@ pub fn validate_anchor(v: &Anchor, ctx: &impl Context) -> Result<(), Invalid> {
     }
 }
 
-/// SPEC §6.6 — Phase 10.
+/// SPEC §6.6.
 pub fn validate_keyparty(v: &KeyParty, ctx: &impl Context) -> Result<(), Invalid> {
     let vote = ctx
         .vote(&v.vote_id)
@@ -299,9 +303,16 @@ pub fn validate_keyparty(v: &KeyParty, ctx: &impl Context) -> Result<(), Invalid
     if v.delay_t > T_CAP {
         return Err(Invalid::Structure("delay above T_cap"));
     }
-    Err(Invalid::NotImplemented(
-        "verifiable timed commitment (Phase 10)",
-    ))
+    crate::keyparties::verify_keyparty(v).map_err(Invalid::KeyParty)?;
+    check_membership(
+        ctx,
+        v.registry_root,
+        v.nullifier,
+        TAG_KEYPARTY,
+        Some(&v.vote_id),
+        &v.content_id(),
+        &v.proof,
+    )
 }
 
 /// SPEC §6.7.
@@ -338,7 +349,7 @@ pub fn validate_witness(v: &Witness, ctx: &impl Context) -> Result<(), Invalid> 
     }
 }
 
-/// SPEC §6.9 — Phase 10.
+/// SPEC §6.9.
 pub fn validate_share(v: &Share, ctx: &impl Context) -> Result<(), Invalid> {
     let kp = ctx
         .keyparty(&v.keyparty_id)
@@ -350,5 +361,9 @@ pub fn validate_share(v: &Share, ctx: &impl Context) -> Result<(), Invalid> {
             "share vote id differs from the key party",
         ));
     }
-    Err(Invalid::NotImplemented("share check sk·G == pk (Phase 10)"))
+    if crate::keyparties::verify_share(&kp, &v.sk) {
+        Ok(())
+    } else {
+        Err(Invalid::Structure("share does not open to the party's pk"))
+    }
 }
