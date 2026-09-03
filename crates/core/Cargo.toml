@@ -12,6 +12,8 @@ cv-crypto.workspace = true
 thiserror.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
+serde.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

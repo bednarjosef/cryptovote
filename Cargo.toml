@@ -24,6 +24,7 @@ publish = false
 cv-core = { path = "crates/core" }
 cv-crypto = { path = "crates/crypto" }
 cv-log = { path = "crates/log" }
+cv-node = { path = "crates/node" }
 cv-client = { path = "crates/client" }
 cv-verifier = { path = "crates/verifier" }
 
@@ -49,15 +50,20 @@ sphinx-packet = "0.7"
 rand = "0.8"
 rand_chacha = "0.3"
 
+# --- infrastructure ---
+redb = "4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "fs", "signal"] }
+axum = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+tokio-util = "0.7"
+
 # --- to be wired in later phases (versions verified 2026-09-03) ---
 # arti-client = "0.46"        # Phase 7
 # tor-rtcompat = "0.46"       # Phase 7
 # uniffi = "0.32"             # Phase 7 (client bindings)
 # wasm-bindgen = "0.2"        # Phase 8
-# axum = "0.8"                # Phase 4
-# reqwest = "0.13"            # Phase 4/5
-# tokio = "1"                 # Phase 4
-# redb = "4"                  # Phase 4
 # electrum-client = "0.25"    # Phase 5 (optional header source)
 
 # --- general ---

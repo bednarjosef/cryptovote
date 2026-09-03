@@ -10,3 +10,11 @@ publish.workspace = true
 [dependencies]
 cv-core.workspace = true
 thiserror.workspace = true
+redb.workspace = true
+hex.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true

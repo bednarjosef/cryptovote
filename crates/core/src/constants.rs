@@ -17,8 +17,9 @@ pub const VTC_T: usize = 33;
 pub const VTC_OPEN: usize = 32;
 /// Assumed fastest sequential 2048-bit modular squaring rate (per second).
 pub const S_MAX_RSA: u64 = 1 << 26;
-/// Hard cap on a key party's delay.
-pub const T_MAX: u64 = 1 << 52;
+/// Hard cap on a key party's delay: the delay of three times the longest
+/// permitted vote (whitepaper §14 `T_cap`).
+pub const T_CAP: u64 = 3 * (MAX_VOTE_BLOCKS as u64) * 600 * S_MAX_RSA * 3 / 2;
 
 pub const MIN_BALLOTS: u32 = 100;
 pub const WITNESS_THRESHOLD_W: usize = 7;
@@ -54,5 +55,6 @@ mod tests {
         assert_eq!(initiative_threshold(1), 1);
         assert_eq!(initiative_threshold(0), 0);
         assert_eq!(required_delay(1152), 69_578_470_195_200);
+        assert_eq!(T_CAP, required_delay(3 * MAX_VOTE_BLOCKS));
     }
 }

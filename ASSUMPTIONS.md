@@ -184,10 +184,13 @@ forcing defenders to spend `k` parallel `T`-length sequential computations
 before the result appears. This is a liveness cost only, bounded by the
 Issuer's Sybil resistance.
 
-**A38 — Ballots declare their party set.** A key party's registration can be
-anchored before `open_block` but its Anchor item published only after ballots
-were cast; if `PK` were defined as "all parties anchored before open", such a
-late anchor would change `PK` and make every honest ballot undecryptable. So
+**A38 — Ballots declare their party set.** Whitepaper §10 says `PK` is
+"fixed at `open_block`" over all valid KeyParty items. A key party's
+registration can be anchored before `open_block` while its Anchor item is
+published only after ballots were cast — not as an attack but as the normal
+case, since an OpenTimestamps proof completes about an hour after the block.
+If `PK` were "all parties anchored before open", every ballot cast before the
+last such anchor surfaced would decrypt to garbage. So
 each ballot lists the `keyparty_id`s it encrypted to (sorted, ≤ 32), and
 decryption of that ballot needs exactly those shares. The counting rule
 requires each declared party to have been anchored before `open_block`
@@ -197,6 +200,10 @@ and the duplicate rule are applied by the *client* when choosing parties and
 reported by verifiers as a secrecy label; they are not counting conditions,
 because a late-surfacing anchor could otherwise retroactively invalidate a
 party and strand the ballots that declared it.
+
+**A42 — `Share` references the KeyParty by content id**, not by `pk_i` as
+whitepaper §6 lists, so two registrations that happen to carry the same `pk`
+cannot be confused; `pk_i` is available through the referenced item.
 
 **A39 — Secrecy of initiative-derived votes** is chosen by the initiative's
 author: the Initiative item carries a `secrecy` byte that is copied into the
@@ -223,7 +230,8 @@ ASIC bound for 2048-bit). A one-week vote whose parties register one day
 before open needs `T ≈ 7 × 10^13`; a commodity solver at ~10^6 squarings/s
 would need about two years to force open, which is why voluntary publication
 after close is the normal path and forced opening is the deterrent. Hard cap
-`T_MAX = 2^52`. Dev mode allows tiny delays.
+`T_CAP = required_delay(3 × MAX_VOTE_BLOCKS)` (whitepaper §14). Dev mode allows
+tiny delays.
 
 **A19 — Ballot payload.** Under `none`, one byte. Under `keyparties`, the
 sorted party list plus two Ristretto points (64 bytes); the ElGamal

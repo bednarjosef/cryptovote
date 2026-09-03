@@ -33,7 +33,7 @@ pub enum Invalid {
     NotImplemented(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Reference {
     Vote(Id),
     Initiative(Id),
@@ -268,8 +268,8 @@ pub fn validate_keyparty(v: &KeyParty, ctx: &impl Context) -> Result<(), Invalid
     if v.registry_root != vote.registry_root {
         return Err(Invalid::Structure("registry root differs from the vote"));
     }
-    if v.delay_t > T_MAX {
-        return Err(Invalid::Structure("delay above T_MAX"));
+    if v.delay_t > T_CAP {
+        return Err(Invalid::Structure("delay above T_cap"));
     }
     Err(Invalid::NotImplemented(
         "verifiable timed commitment (Phase 10)",

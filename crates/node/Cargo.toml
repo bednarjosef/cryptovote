@@ -7,6 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "cv_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cv-node"
+path = "src/main.rs"
+
 [dependencies]
 cv-core.workspace = true
 cv-crypto.workspace = true
@@ -14,3 +22,16 @@ cv-log.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[dev-dependencies]
+cv-client.workspace = true
+tempfile.workspace = true

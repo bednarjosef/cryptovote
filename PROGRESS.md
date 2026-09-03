@@ -118,3 +118,38 @@ The class-group puzzle of the original Phase 3 no longer exists (BLOCKERS.md
   keeps the content id and stays valid (A3 demonstrated); non-members cannot
   build items; initiatives share an author pseudonym; witnesses need a known
   node key; dev anchors are rejected outside dev mode.
+
+## Phase 4 — Log and node  (2026-09-03)
+
+- `cv-log`: `Store` trait with `MemoryStore` and `RedbStore` (pure-Rust ACID
+  file); `HeaderSource` trait with the dev-only `MockChain` (local clock);
+  the `Log`: append-ordered validated set, dedup by exact bytes and by
+  content id (re-randomized proofs are `Equivalent`, kept once, not relayed),
+  bounded orphan pool keyed by the missing reference with cascading retry,
+  nullifier groups per scope, anchor coverage (earliest height per item),
+  inclusion proofs, light-client status by nullifier, registry snapshots with
+  leaves and lazily built trees, pruning with archived results, snapshot
+  export (SPEC §15), replay from storage without re-verifying proofs.
+  `Log` implements `Context`, so validation on the node is the `cv-core` rule
+  set, unchanged.
+- `cv-node`: axum HTTP API (`/v1/...`: submit, fetch by content id / hash,
+  inventory, votes, ballots, nullifier status, anchors and proofs, registry
+  files, headers tip, snapshot, status); gossip = push of every new item to
+  all peers plus periodic pull of registries and inventories; CLI with
+  redb/memory store, dev flag (prints a warning at startup), registry
+  bootstrap files. Release mode refuses to start until Phase 5 provides a
+  header source.
+- `cv-client::light::NodeClient`: HTTP light client used by tests, the
+  simulation and later phases.
+- Whitepaper v0.3 reconciled: `T_CAP = required_delay(3 × MAX_VOTE_BLOCKS)`,
+  `Share` references the KeyParty by content id (A42), and the reason
+  ballots declare their party set (A38: OTS proofs for pre-open blocks
+  complete after open) is now stated in SPEC §11.1.
+- Tests: Log unit tests (orphan cascade, dedup, rejection, differing
+  duplicates, anchors and proofs, header-gated orphans, pruning, node
+  registration duplicate rule, redb reopen); cluster test: 5 in-process
+  nodes in a line topology converge to the same 8-item set from submissions
+  spread over all nodes and a registry posted to one node; an invalid ballot
+  is rejected and never appears elsewhere; byte-identical and re-randomized
+  duplicates do not spread; a differing duplicate propagates and every node
+  reports two ballots under the nullifier.

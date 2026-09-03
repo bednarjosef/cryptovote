@@ -13,6 +13,7 @@ pub mod identity;
 pub mod items;
 pub mod registry;
 pub mod validate;
+pub mod wire;
 
 pub use cv_crypto as crypto;
 pub use error::DecodeError;

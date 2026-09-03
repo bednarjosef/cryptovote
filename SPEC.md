@@ -1,7 +1,7 @@
 # CryptoVote protocol specification — byte-exact formats and rules
 
 Status: **Phase 0 amended (secrecy design), v1 wire format.** This document is
-the normative companion to `whitepaper.md` (v0.2). Where the whitepaper is
+the normative companion to `whitepaper.md` (v0.3). Where the whitepaper is
 silent or ambiguous, the choice made here is listed in `ASSUMPTIONS.md`.
 Whitepaper §7 (puzzle-derived shared key) is superseded by §10–§11 of this
 document ("key parties"); see `BLOCKERS.md #1` for the reason.
@@ -488,7 +488,7 @@ Validity:
 
 - [ ] Referenced VoteDefinition exists, is valid, and has `secrecy = keyparties`.
 - [ ] `registry_root == vote.registry_root`.
-- [ ] `delay_T ≤ T_MAX`; `modulus` is odd, `2^2047 < N < 2^2048`; `g, h, poe ∈ [2, N−1]`.
+- [ ] `delay_T ≤ T_CAP`; `modulus` is odd, `2^2047 < N < 2^2048`; `g, h, poe ∈ [2, N−1]`.
 - [ ] VTC verification of §10.3 passes (proof of exponentiation, challenge set, openings, Lagrange consistency).
 - [ ] `proof` verifies with `[registry_root, nullifier, tag("keyparty"), fr_mod(vote_id), fr_mod(keyparty_id)]`.
 - Duplicates: §7.1 on `nullifier` — one key party per person per vote; a differing duplicate removes both from **client selection** (§11.1) but does not affect decryption of ballots that already declared them (A38).
@@ -537,7 +537,9 @@ share_id = content_id = blake3(item bytes)
 ```
 
 Validity: the referenced KeyParty exists and is valid (else orphan pool);
-`sk · G == keyparty.pk`. Anyone may publish a Share: the party itself after
+`sk · G == keyparty.pk`. The party is referenced by its content id rather than
+by `pk_i` (whitepaper §6) so that two registrations with the same `pk` cannot
+be confused (A42). Anyone may publish a Share: the party itself after
 `close_block`, or any solver who force-opened the commitment (§10.5). No
 proof is needed because correctness is checked against `pk` directly.
 
@@ -702,7 +704,7 @@ reveal nothing about `sk`; the remaining shares are inside puzzles of delay `T`.
 ```
 required_delay(blocks) = blocks × 600 × S_MAX_RSA × 3 / 2          (M = 1.5)
 S_MAX_RSA              = 2^26 sequential 2048-bit modular squarings per second (assumed fastest hardware)
-T_MAX                  = 2^52
+T_CAP                  = required_delay(3 × MAX_VOTE_BLOCKS)   (whitepaper §14: three times the longest permitted vote)
 ```
 
 A key party is *selectable* (§11.1) for a vote only if
@@ -738,6 +740,12 @@ A38).
 ## 11. Ballot encryption (secrecy = keyparties)
 
 ### 11.1 Party selection (client)
+
+Whitepaper §10 fixes `PK` "at `open_block`" over all valid KeyParty items.
+Anchor items for blocks before `open_block` are routinely published *after*
+`open_block` (an OTS proof takes about an hour to complete), so a client
+casting at open cannot know the final set; ballots therefore declare the set
+they used (A38) and `PK` is per ballot.
 
 At cast time the client takes every KeyParty item for the vote that is
 intrinsically valid, not excluded by the duplicate rule, anchored at height
@@ -886,7 +894,7 @@ between the deadline and `open_block` (144 blocks) like for any other vote.
 | `VTC_N`, `VTC_T`, `VTC_OPEN` | 64, 33, 32 | §10.6 D6 |
 | `S_MAX_RSA` | 2^26 squarings/s | A13 |
 | `M` | 1.5 | whitepaper §14 |
-| `T_MAX` | 2^52 | user decision, A13 |
+| `T_CAP` | `required_delay(3 × MAX_VOTE_BLOCKS)` ≈ 2^53 | whitepaper §14 |
 | `MIN_BALLOTS` | 100 | whitepaper §14 |
 | `W` (fallback witnesses) | 7 | whitepaper §14 |
 | `initiative_threshold(size)` | `ceil(size / 100)` | whitepaper §14 (1 %) |
