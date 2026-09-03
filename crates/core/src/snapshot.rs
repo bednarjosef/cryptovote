@@ -5,7 +5,7 @@ use crate::DecodeError;
 use crate::constants::MAX_ITEM_BYTES;
 use crate::context::{Context, Deployment, RegistryInfo};
 use crate::crypto::field::{Fr, fr_to_bytes};
-use crate::crypto::groth16::MembershipKeys;
+use crate::crypto::groth16::MembershipVerifier;
 use crate::encoding::{Reader, Writer};
 use crate::items::*;
 use crate::registry::RegistrySnapshot;
@@ -66,7 +66,7 @@ pub struct LoadReport {
 
 pub struct SnapshotView {
     deployment: Deployment,
-    keys: Arc<MembershipKeys>,
+    verifier: Arc<MembershipVerifier>,
     headers: Arc<dyn Headers>,
     registries: HashMap<Fr, RegistryInfo>,
     items: HashMap<Id, Item>,
@@ -87,12 +87,12 @@ pub struct SnapshotView {
 impl SnapshotView {
     pub fn empty(
         deployment: Deployment,
-        keys: Arc<MembershipKeys>,
+        verifier: Arc<MembershipVerifier>,
         headers: Arc<dyn Headers>,
     ) -> Self {
         SnapshotView {
             deployment,
-            keys,
+            verifier,
             headers,
             registries: HashMap::new(),
             items: HashMap::new(),
@@ -116,11 +116,11 @@ impl SnapshotView {
     pub fn load(
         bytes: &[u8],
         deployment: Deployment,
-        keys: Arc<MembershipKeys>,
+        verifier: Arc<MembershipVerifier>,
         headers: Arc<dyn Headers>,
     ) -> Result<Self, DecodeError> {
         let (registries, items) = decode_snapshot(bytes)?;
-        let mut view = Self::empty(deployment, keys, headers);
+        let mut view = Self::empty(deployment, verifier, headers);
         for r in registries {
             view.add_registry(r);
         }
@@ -271,8 +271,8 @@ impl Context for SnapshotView {
     fn deployment(&self) -> &Deployment {
         &self.deployment
     }
-    fn membership_keys(&self) -> &MembershipKeys {
-        &self.keys
+    fn membership_verifier(&self) -> &MembershipVerifier {
+        &self.verifier
     }
     fn registry(&self, root: &Fr) -> Option<RegistryInfo> {
         self.registries.get(root).copied()

@@ -9,6 +9,7 @@ pub mod constants;
 pub mod context;
 pub mod encoding;
 pub mod error;
+pub mod headers;
 pub mod identity;
 pub mod items;
 pub mod keyparties;

@@ -138,7 +138,9 @@ fn insert_dedup_orphans_duplicates_prune() {
     assert_eq!(log.insert(&ballot_bytes).unwrap(), Accepted::AlreadyHave);
     let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
     let rr = Ballot {
-        proof: Proof(groth16::rerandomize(&dev_keys().vk, &ballot.proof.0, &mut rng).unwrap()),
+        proof: Proof(
+            groth16::rerandomize(&dev_keys().verifier.vk, &ballot.proof.0, &mut rng).unwrap(),
+        ),
         ..ballot.clone()
     };
     assert_eq!(

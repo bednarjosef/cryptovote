@@ -218,7 +218,9 @@ async fn five_nodes_converge_reject_invalid_and_dedupe() {
     // Re-randomized proof: Equivalent, not stored again.
     let mut rng = ChaCha20Rng::from_seed([2u8; 32]);
     let rr = Ballot {
-        proof: Proof(groth16::rerandomize(&keys.vk, &ballots[0].proof.0, &mut rng).unwrap()),
+        proof: Proof(
+            groth16::rerandomize(&keys.verifier.vk, &ballots[0].proof.0, &mut rng).unwrap(),
+        ),
         ..ballots[0].clone()
     };
     assert!(matches!(

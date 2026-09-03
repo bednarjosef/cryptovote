@@ -3,7 +3,7 @@
 
 use crate::items::*;
 use cv_crypto::field::Fr;
-use cv_crypto::groth16::MembershipKeys;
+use cv_crypto::groth16::{MembershipKeys, MembershipVerifier};
 use std::collections::HashMap;
 
 /// A known Registry snapshot (only what validation needs).
@@ -29,7 +29,7 @@ pub struct Deployment {
 /// simulation).
 pub trait Context {
     fn deployment(&self) -> &Deployment;
-    fn membership_keys(&self) -> &MembershipKeys;
+    fn membership_verifier(&self) -> &MembershipVerifier;
     fn registry(&self, root: &Fr) -> Option<RegistryInfo>;
     fn vote(&self, id: &Id) -> Option<VoteDefinition>;
     fn initiative(&self, id: &Id) -> Option<Initiative>;
@@ -96,8 +96,8 @@ impl Context for MemoryContext {
     fn deployment(&self) -> &Deployment {
         &self.deployment
     }
-    fn membership_keys(&self) -> &MembershipKeys {
-        self.keys
+    fn membership_verifier(&self) -> &MembershipVerifier {
+        &self.keys.verifier
     }
     fn registry(&self, root: &Fr) -> Option<RegistryInfo> {
         self.registries.get(root).copied()

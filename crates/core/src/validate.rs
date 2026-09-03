@@ -102,7 +102,7 @@ fn check_membership(
     proof: &Proof,
 ) -> Result<(), Invalid> {
     let stmt = MembershipStatement::new(root, nullifier, tag, id, content_id);
-    if verify_membership(ctx.membership_keys(), &stmt, proof) {
+    if verify_membership(ctx.membership_verifier(), &stmt, proof) {
         Ok(())
     } else {
         Err(Invalid::BadProof)

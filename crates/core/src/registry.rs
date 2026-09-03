@@ -70,7 +70,7 @@ impl RegistryTree {
     /// Append a leaf; returns its index.
     pub fn push(&mut self, leaf: Fr) -> u32 {
         let index = self.levels[0].len();
-        assert!(index < (1usize << REGISTRY_DEPTH), "registry full");
+        assert!((index as u64) < (1u64 << REGISTRY_DEPTH), "registry full");
         self.levels[0].push(leaf);
         self.recompute_path(index);
         index as u32

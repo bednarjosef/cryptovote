@@ -4,7 +4,7 @@ use crate::constants::REGISTRY_DEPTH;
 use crate::items::{Id, Proof};
 use cv_crypto::circuit::MembershipCircuit;
 use cv_crypto::field::{Fr, fr_mod, fr_to_bytes, tag_field};
-use cv_crypto::groth16::{self, MembershipKeys};
+use cv_crypto::groth16::{self, MembershipKeys, MembershipVerifier};
 use cv_crypto::hash::tagged;
 use cv_crypto::poseidon;
 use rand::SeedableRng;
@@ -95,9 +95,9 @@ pub fn prove_membership(
 }
 
 pub fn verify_membership(
-    keys: &MembershipKeys,
+    verifier: &MembershipVerifier,
     statement: &MembershipStatement,
     proof: &Proof,
 ) -> bool {
-    groth16::verify(&keys.pvk, &statement.public_inputs(), &proof.0)
+    groth16::verify(&verifier.pvk, &statement.public_inputs(), &proof.0)
 }

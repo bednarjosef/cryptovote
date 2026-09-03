@@ -196,7 +196,7 @@ fn ballots_are_deterministic_and_validated() {
 
     // Re-randomized proof: still valid, same content id, different item hash (A3).
     let mut rng = ChaCha20Rng::from_seed([8u8; 32]);
-    let rr = groth16::rerandomize(&dev_keys().vk, &b1.proof.0, &mut rng).unwrap();
+    let rr = groth16::rerandomize(&dev_keys().verifier.vk, &b1.proof.0, &mut rng).unwrap();
     let b_rr = Ballot {
         proof: Proof(rr),
         ..b1.clone()

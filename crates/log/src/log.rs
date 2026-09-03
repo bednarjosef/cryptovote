@@ -5,7 +5,7 @@ use crate::store::{Store, StoreError};
 use cv_core::DecodeError;
 use cv_core::context::{Context, Deployment, RegistryInfo};
 use cv_core::crypto::field::{Fr, fr_to_bytes};
-use cv_core::crypto::groth16::MembershipKeys;
+use cv_core::crypto::groth16::{MembershipKeys, MembershipVerifier};
 use cv_core::crypto::hash::blake3_hash;
 use cv_core::crypto::merkle::{InclusionProof, prove_inclusion};
 use cv_core::items::*;
@@ -769,8 +769,8 @@ impl Context for Log {
     fn deployment(&self) -> &Deployment {
         &self.deployment
     }
-    fn membership_keys(&self) -> &MembershipKeys {
-        &self.keys
+    fn membership_verifier(&self) -> &MembershipVerifier {
+        &self.keys.verifier
     }
     fn registry(&self, root: &Fr) -> Option<RegistryInfo> {
         self.registries.get(root).map(|e| RegistryInfo {

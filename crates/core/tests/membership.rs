@@ -137,7 +137,7 @@ fn membership_proofs_verify_and_wrong_statements_fail() {
     let proof = prove_membership(keys, &stmt, &wit, &content_id).unwrap();
     let prove_time = t1.elapsed();
     let t2 = Instant::now();
-    assert!(verify_membership(keys, &stmt, &proof));
+    assert!(verify_membership(&keys.verifier, &stmt, &proof));
     let verify_time = t2.elapsed();
     eprintln!(
         "membership circuit: {constraints} constraints; dev setup {:.2?}; prove {:.2?}; verify {:.2?}",
@@ -148,19 +148,19 @@ fn membership_proofs_verify_and_wrong_statements_fail() {
     // Wrong root, nullifier, tag, id, signal → reject.
     let mut bad = stmt;
     bad.root = empty_hashes()[32];
-    assert!(!verify_membership(keys, &bad, &proof));
+    assert!(!verify_membership(&keys.verifier, &bad, &proof));
     let mut bad = stmt;
     bad.nullifier = nullifier(&s, TAG_BALLOT, &fr_mod(&[0u8; 32]));
-    assert!(!verify_membership(keys, &bad, &proof));
+    assert!(!verify_membership(&keys.verifier, &bad, &proof));
     let mut bad = stmt;
     bad.tag = tag_field(TAG_SUPPORT);
-    assert!(!verify_membership(keys, &bad, &proof));
+    assert!(!verify_membership(&keys.verifier, &bad, &proof));
     let mut bad = stmt;
     bad.id = Fr::from(0u64);
-    assert!(!verify_membership(keys, &bad, &proof));
+    assert!(!verify_membership(&keys.verifier, &bad, &proof));
     let mut bad = stmt;
     bad.signal = fr_mod(&[0xceu8; 32]);
-    assert!(!verify_membership(keys, &bad, &proof));
+    assert!(!verify_membership(&keys.verifier, &bad, &proof));
 
     // A non-member cannot prove (proof for a wrong path/root does not verify).
     let outsider = fr_mod(&[99u8; 32]);
@@ -174,11 +174,19 @@ fn membership_proofs_verify_and_wrong_statements_fail() {
     assert!(prove_membership(keys, &stmt2, &wit2, &content_id).is_err());
 
     // Malformed proof bytes verify as false, never panic.
-    assert!(!verify_membership(keys, &stmt, &Proof([0u8; 128])));
-    assert!(!verify_membership(keys, &stmt, &Proof([0xffu8; 128])));
+    assert!(!verify_membership(
+        &keys.verifier,
+        &stmt,
+        &Proof([0u8; 128])
+    ));
+    assert!(!verify_membership(
+        &keys.verifier,
+        &stmt,
+        &Proof([0xffu8; 128])
+    ));
     let mut flipped = proof.clone();
     flipped.0[5] ^= 1;
-    assert!(!verify_membership(keys, &stmt, &flipped));
+    assert!(!verify_membership(&keys.verifier, &stmt, &flipped));
 
     // Deterministic proof randomness: identical bytes on re-derivation (A20).
     let again = prove_membership(keys, &stmt, &wit, &content_id).unwrap();
@@ -190,10 +198,10 @@ fn membership_proofs_verify_and_wrong_statements_fail() {
     let p = nullifier(&s, TAG_AUTHOR, &Fr::from(0u64));
     let stmt3 = MembershipStatement::new(tree.root(), p, TAG_AUTHOR, None, &content_id);
     let proof3 = prove_membership(keys, &stmt3, &wit, &content_id).unwrap();
-    assert!(verify_membership(keys, &stmt3, &proof3));
+    assert!(verify_membership(&keys.verifier, &stmt3, &proof3));
 
     // Pin the development verifying key and constraint count.
-    let vk_hash = cv_core::crypto::hash::blake3_hash(&groth16::vk_to_bytes(&keys.vk));
+    let vk_hash = cv_core::crypto::hash::blake3_hash(&groth16::vk_to_bytes(&keys.verifier.vk));
     pin(
         "circuit.json",
         &serde_json::json!({
@@ -206,6 +214,9 @@ fn membership_proofs_verify_and_wrong_statements_fail() {
         }),
     );
     // VK round trip.
-    let vk2 = groth16::vk_from_bytes(&groth16::vk_to_bytes(&keys.vk)).unwrap();
-    assert_eq!(groth16::vk_to_bytes(&vk2), groth16::vk_to_bytes(&keys.vk));
+    let vk2 = groth16::vk_from_bytes(&groth16::vk_to_bytes(&keys.verifier.vk)).unwrap();
+    assert_eq!(
+        groth16::vk_to_bytes(&vk2),
+        groth16::vk_to_bytes(&keys.verifier.vk)
+    );
 }

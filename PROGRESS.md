@@ -248,3 +248,28 @@ The class-group puzzle of the original Phase 3 no longer exists (BLOCKERS.md
   mid-hold** (redb queue) forwards after restart on the same address;
   **Tor unreachable** falls back to direct with the indicator saying so, and
   with no registered hops at all the send is DIRECT.
+
+## Phase 8 — Verifier  (2026-09-03)
+
+- `cv-verifier`: 297 lines total (lib 155, CLI 82, wasm 60), depends only on
+  `cv-core`. `verify(snapshot, headers, config, only_vote)` loads a SPEC §15
+  snapshot through `SnapshotView` (validation in dependency order), applies
+  the counting rule to every vote, derives initiative votes, and returns a
+  report that names the guarantee level (`anchored` or `FALLBACK …`) with
+  every result. `render` prints it; `--json` dumps it.
+- CLI takes the snapshot file (`curl NODE/v1/snapshot`), a SPEC §15 header
+  file (validated chain, no confirmation delay: the user chooses the chain),
+  issuer/authority keys and the verifying key; `--dev` substitutes mock
+  headers and the insecure dev key and prints a warning; `--export-dev-vk`.
+- WebAssembly: `cargo build -p cv-verifier --lib --target wasm32-unknown-unknown --features wasm --release`
+  produces `cv_verifier.wasm` exporting `verify_snapshot(snapshot, headers,
+  config_json) -> JSON`. Building it surfaced a 32-bit overflow in the
+  registry capacity check (fixed) and the `getrandom` wasm feature
+  requirements (`.cargo/config.toml`).
+- Refactor: verifiers hold only the verifying key (`MembershipVerifier`);
+  the validated `HeaderChain` moved into `cv-core::headers` so the verifier
+  does not depend on `cv-log`.
+- Tests: result recomputed from a scrambled snapshot with an after-close
+  anchor ignored, guarantee `anchored`; a witness-only snapshot yields the
+  same counts labelled `FALLBACK`; malformed snapshots are rejected; vote
+  filtering.

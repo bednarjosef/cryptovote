@@ -22,17 +22,38 @@ pub const DEV_SETUP_SEED: [u8; 32] = *b"cryptovote dev groth16 setup !!!";
 
 pub const PROOF_BYTES: usize = 128;
 
-pub struct MembershipKeys {
-    pub pk: ProvingKey<Bn254>,
+/// What a verifier needs: the verifying key (and its prepared form).
+#[derive(Clone)]
+pub struct MembershipVerifier {
     pub vk: VerifyingKey<Bn254>,
     pub pvk: PreparedVerifyingKey<Bn254>,
 }
 
+impl MembershipVerifier {
+    pub fn from_vk(vk: VerifyingKey<Bn254>) -> Self {
+        let pvk = prepare_verifying_key(&vk);
+        MembershipVerifier { vk, pvk }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        vk_from_bytes(bytes).map(Self::from_vk)
+    }
+}
+
+/// Prover side: proving key plus the verifier.
+pub struct MembershipKeys {
+    pub pk: ProvingKey<Bn254>,
+    pub verifier: MembershipVerifier,
+}
+
 impl MembershipKeys {
     pub fn from_proving_key(pk: ProvingKey<Bn254>) -> Self {
-        let vk = pk.vk.clone();
-        let pvk = prepare_verifying_key(&vk);
-        MembershipKeys { pk, vk, pvk }
+        let verifier = MembershipVerifier::from_vk(pk.vk.clone());
+        MembershipKeys { pk, verifier }
+    }
+
+    pub fn vk(&self) -> &VerifyingKey<Bn254> {
+        &self.verifier.vk
     }
 }
 

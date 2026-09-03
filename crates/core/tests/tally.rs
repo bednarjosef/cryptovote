@@ -117,7 +117,11 @@ fn world(dev_mode: bool) -> World {
 }
 
 fn view(w: &World) -> SnapshotView {
-    let mut v = SnapshotView::empty(w.deployment.clone(), w.keys.clone(), w.headers.clone());
+    let mut v = SnapshotView::empty(
+        w.deployment.clone(),
+        Arc::new(w.keys.verifier.clone()),
+        w.headers.clone(),
+    );
     v.add_registry(w.snapshot.clone());
     v.admit(Item::VoteDefinition(w.vote.clone())).unwrap();
     v
@@ -498,7 +502,7 @@ fn initiative_derivation_and_snapshot_roundtrip() {
     let loaded = SnapshotView::load(
         &bytes,
         w.deployment.clone(),
-        w.keys.clone(),
+        Arc::new(w.keys.verifier.clone()),
         w.headers.clone(),
     )
     .unwrap();
@@ -514,7 +518,7 @@ fn initiative_derivation_and_snapshot_roundtrip() {
         SnapshotView::load(
             &bytes[..20],
             w.deployment.clone(),
-            w.keys.clone(),
+            Arc::new(w.keys.verifier.clone()),
             w.headers.clone()
         )
         .is_err()
