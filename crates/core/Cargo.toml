@@ -1,0 +1,12 @@
+[package]
+name = "cv-core"
+description = "Types, canonical serialization, validity rules and tally. The single implementation of the protocol rules (SPEC.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cv-crypto.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "cv-crypto"
+description = "Thin wrappers over the primitive crates. No primitive is implemented here."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+blake3.workspace = true
+ark-bn254.workspace = true
+ark-ff.workspace = true
+ark-ec.workspace = true
+ark-std.workspace = true
+ark-serialize.workspace = true
+ark-relations.workspace = true
+ark-r1cs-std.workspace = true
+ark-snark.workspace = true
+ark-groth16.workspace = true
+ark-crypto-primitives.workspace = true
+kyn-vdf.workspace = true
+chacha20poly1305.workspace = true
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+rs_merkle.workspace = true
+bitcoin.workspace = true
+opentimestamps.workspace = true
+sphinx-packet.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+thiserror.workspace = true

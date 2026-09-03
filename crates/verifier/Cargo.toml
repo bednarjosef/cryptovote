@@ -1,0 +1,13 @@
+[package]
+name = "cv-verifier"
+description = "Small independent verifier: recomputes any result from a Log snapshot and Bitcoin headers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cv-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true

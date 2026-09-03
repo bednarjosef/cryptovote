@@ -1,0 +1,17 @@
+[package]
+name = "cv-sim"
+description = "End-to-end local simulation of a full vote."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cv-core.workspace = true
+cv-crypto.workspace = true
+cv-log.workspace = true
+cv-client.workspace = true
+cv-verifier.workspace = true
+anyhow.workspace = true
+clap.workspace = true

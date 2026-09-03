@@ -1,0 +1,15 @@
+[package]
+name = "cv-client"
+description = "Participant library (UniFFI) and CLI wrapper."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cv-core.workspace = true
+cv-crypto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+thiserror.workspace = true

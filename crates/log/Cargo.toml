@@ -1,0 +1,12 @@
+[package]
+name = "cv-log"
+description = "Log storage: append-only set semantics, duplicate rules, orphan pool, pruning."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cv-core.workspace = true
+thiserror.workspace = true
