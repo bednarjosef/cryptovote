@@ -153,3 +153,46 @@ The class-group puzzle of the original Phase 3 no longer exists (BLOCKERS.md
   is rejected and never appears elsewhere; byte-identical and re-randomized
   duplicates do not spread; a differing duplicate propagates and every node
   reports two ballots under the nullifier.
+
+## Phase 5 — Anchoring  (2026-09-03)
+
+- `cv-crypto::ots`: parse/serialize OTS timestamps, extract Bitcoin and
+  pending attestations, upgrade a pending proof with a calendar's completed
+  timestamp (all op execution by the `opentimestamps` crate).
+- `cv-crypto::spv`: header decode/encode, proof of work, linkage, direct
+  anchor verification (`OP_RETURN "CVOT"||root` + partial Merkle tree),
+  regtest-difficulty test miner.
+- `cv-log::headers`: validated `HeaderChain` from a checkpoint (linkage, PoW,
+  difficulty-change clamp, 6 confirmations, SPEC §15 header file) plus the
+  dev `MockChain`.
+- `cv-core::validate`: full Anchor validation: OTS proofs must reach a
+  Bitcoin attestation at exactly the claimed height whose digest equals the
+  block's merkle root; pending-only proofs are `Unverified` (rejected);
+  direct proofs by SPV; dev proofs only in dev mode.
+- `cv-core::tally`: the counting rule (SPEC §12) with `Anchored`/`Fallback`
+  guarantee levels over the union of anchors, witness fallback with W
+  distinct registered nodes, the duplicate rule restricted to timely items,
+  `min_ballots`; initiative → vote derivation (SPEC §13).
+- `cv-core::snapshot`: SPEC §15 snapshot with registry headers; `SnapshotView`
+  validates in dependency order and implements `Context` + `LogView` (the
+  verifier's core).
+- `cv-node::anchor`: anchorer role — dev anchors on the mock chain; OTS path:
+  submit each new root to ≥ 3 calendars, persist pending submissions, poll
+  calendars for upgrades, verify the completed proof against the node's own
+  header and publish the Anchor; direct-anchor `prepare`/`publish`
+  subcommands. `cv-node::headers_http`: Esplora-style header sync into the
+  validated chain. Release mode now starts with ceremony keys, a checkpoint
+  and a header API.
+- Tests (10 new, 44 total): a ballot under any valid anchor at height ≤ close
+  counts and one anchored only after close does not (union of three anchors);
+  a late anchor at exactly close counts; differing duplicates anchored before
+  close drop both, after close change nothing; below-minimum; fallback with
+  exactly W witnesses vs W−1, unregistered and double-registered witnesses
+  ignored, fallback switched off by any anchor; OTS proof valid / wrong
+  height / wrong digest / **pending = unverified** / unknown header; direct
+  anchor valid and wrong block; initiative derivation (unanchored, anchored
+  after deadline, anchored before → derived definition validates, tampered
+  fails); snapshot load in scrambled order with an invalid item skipped;
+  header chain confirmations and file round trip; dev anchorer anchors
+  automatically; OTS anchorer end to end against a mock calendar (pending →
+  nothing anchored → attested + header → anchor published and re-verified).

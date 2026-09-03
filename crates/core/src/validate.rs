@@ -29,6 +29,10 @@ pub enum Invalid {
     DerivationMismatch,
     #[error("dev-mode-only construct in a non-dev context")]
     DevOnly,
+    #[error("anchor proof does not resolve to the claimed block")]
+    BadAnchorProof,
+    #[error("anchor proof is not yet in Bitcoin (pending calendar attestation)")]
+    Unverified,
     #[error("not implemented in this phase: {0}")]
     NotImplemented(&'static str),
 }
@@ -234,7 +238,7 @@ pub fn validate_ballot(v: &Ballot, ctx: &impl Context) -> Result<(), Invalid> {
     )
 }
 
-/// SPEC §6.5 — proof verification is Phase 5; structure and dev gating here.
+/// SPEC §6.5.
 pub fn validate_anchor(v: &Anchor, ctx: &impl Context) -> Result<(), Invalid> {
     if v.leaves.is_empty() || v.leaves.len() > MAX_ANCHOR_LEAVES {
         return Err(Invalid::Structure("anchor leaf count"));
@@ -242,18 +246,42 @@ pub fn validate_anchor(v: &Anchor, ctx: &impl Context) -> Result<(), Invalid> {
     if v.leaves.windows(2).any(|w| w[0] >= w[1]) {
         return Err(Invalid::Structure("anchor leaves not strictly ascending"));
     }
+    let height = v.proof.height();
+    // TRUST: Bitcoin for ordering (whitepaper §2); the header must be known and confirmed.
+    let block_root = ctx
+        .block_merkle_root(height)
+        .ok_or(Invalid::MissingReference(Reference::Header(height)))?;
+    let root = cv_crypto::merkle::anchor_root(&v.leaves).expect("non-empty leaves");
     match &v.proof {
-        AnchorProof::Dev { height } => {
+        AnchorProof::Dev { .. } => {
             if !ctx.dev_mode() {
                 return Err(Invalid::DevOnly);
             }
-            ctx.block_merkle_root(*height)
-                .ok_or(Invalid::MissingReference(Reference::Header(*height)))?;
             Ok(())
         }
-        AnchorProof::Ots { .. } | AnchorProof::Direct { .. } => {
-            Err(Invalid::NotImplemented("anchor proofs (Phase 5)"))
+        AnchorProof::Ots { ots, .. } => {
+            // TRUST: OTS calendars for liveness only (whitepaper §2) — the proof is recomputed here.
+            let ts = cv_crypto::ots::parse(&root, ots)
+                .map_err(|_| Invalid::Structure("ots proof does not parse"))?;
+            let att = cv_crypto::ots::attestations(&ts);
+            if att
+                .bitcoin
+                .iter()
+                .any(|(h, d)| *h == height && d.as_slice() == block_root)
+            {
+                Ok(())
+            } else if att.bitcoin.is_empty() && !att.pending.is_empty() {
+                Err(Invalid::Unverified)
+            } else {
+                Err(Invalid::BadAnchorProof)
+            }
         }
+        AnchorProof::Direct {
+            raw_tx,
+            partial_merkle_tree,
+            ..
+        } => cv_crypto::spv::verify_direct(raw_tx, partial_merkle_tree, &root, &block_root)
+            .map_err(|_| Invalid::BadAnchorProof),
     }
 }
 

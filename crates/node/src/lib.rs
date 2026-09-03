@@ -2,8 +2,10 @@
 //! Roles added in later phases: anchorer (5), mix hop (7), solver (10).
 #![forbid(unsafe_code)]
 
+pub mod anchor;
 pub mod api;
 pub mod gossip;
+pub mod headers_http;
 
 use cv_core::crypto::field::Fr;
 use cv_core::registry::RegistrySnapshot;
@@ -24,6 +26,7 @@ pub struct NodeConfig {
     pub gossip_interval: Duration,
     /// Also gossip to endpoints found in NodeRegistration items.
     pub gossip_to_registered: bool,
+    pub anchor: anchor::AnchorConfig,
 }
 
 impl Default for NodeConfig {
@@ -34,6 +37,7 @@ impl Default for NodeConfig {
             peers: Vec::new(),
             gossip_interval: Duration::from_secs(10),
             gossip_to_registered: false,
+            anchor: anchor::AnchorConfig::default(),
         }
     }
 }
@@ -169,12 +173,22 @@ pub async fn start(config: NodeConfig, log: Log) -> anyhow::Result<NodeHandle> {
         client.clone(),
         shutdown_rx.clone(),
     ));
-    let pull = tokio::spawn(gossip::pull_loop(node.clone(), client, shutdown_rx));
+    let pull = tokio::spawn(gossip::pull_loop(
+        node.clone(),
+        client.clone(),
+        shutdown_rx.clone(),
+    ));
+    let anchorer = tokio::spawn(anchor::anchor_loop(
+        node.clone(),
+        config.anchor.clone(),
+        client,
+        shutdown_rx,
+    ));
     tracing::info!(node = %config.name, %addr, "node started");
     Ok(NodeHandle {
         addr,
         node,
         shutdown: shutdown_tx,
-        tasks: vec![server, push, pull],
+        tasks: vec![server, push, pull, anchorer],
     })
 }

@@ -23,4 +23,6 @@ pub enum DecodeError {
     Unsorted,
     #[error("wrong element count: expected {expected}, got {got}")]
     Count { expected: usize, got: usize },
+    #[error("malformed structure")]
+    Structure,
 }

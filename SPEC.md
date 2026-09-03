@@ -915,13 +915,15 @@ differs.
 ## 15. Snapshot format (verifier input)
 
 ```
-Snapshot := magic("CVSNAP01") || items(list<bytes>)
+Snapshot := magic("CVSNAP01") || registries(list<bytes>) || items(list<bytes>)
 Headers  := magic("CVHDR001") || start_height(u32) || headers(list<[80]>)
 ```
 
-Each `items[i]` is one encoded Item (§2). Order is irrelevant. The verifier
-decodes, validates, and applies §12/§13. It prints the guarantee level with
-every result.
+Each `registries[i]` is an encoded `RegistrySnapshot` (§4.3; the verifier
+needs signed roots and leaf counts, not the leaves). Each `items[i]` is one
+encoded Item (§2). Order is irrelevant: the verifier decodes, validates items
+in dependency order (repeating passes until nothing new validates), and
+applies §12/§13. It prints the guarantee level with every result.
 
 ---
 

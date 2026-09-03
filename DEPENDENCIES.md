@@ -66,7 +66,7 @@ a modular exponentiation is written here.
 |---|---|---|---|
 | `redb` | 4.2 | 4, 7 | Pure-Rust embedded ACID store for the Log and disk-backed mix queues; no C deps |
 | `axum` | 0.8 | 4 | HTTP server for gossip and light-client queries (ASSUMPTIONS A26) |
-| `reqwest` | 0.13 | 4, 5 | HTTP client (peers, OTS calendars, header API) |
+| `reqwest` | 0.13 (`rustls` via aws-lc-rs) | 4, 5 | HTTP client (peers, OTS calendars over HTTPS, Esplora header API) |
 | `tokio` | 1.53 | 4 | Async runtime (required by axum, arti) |
 | `electrum-client` | 0.25 | 5 | Optional Bitcoin header source |
 | `arti-client`, `tor-rtcompat` | 0.46 | 7 | Embedded Tor (whitepaper §12) |

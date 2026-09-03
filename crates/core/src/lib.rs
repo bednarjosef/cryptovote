@@ -11,7 +11,10 @@ pub mod encoding;
 pub mod error;
 pub mod identity;
 pub mod items;
+pub mod keyparties;
 pub mod registry;
+pub mod snapshot;
+pub mod tally;
 pub mod validate;
 pub mod wire;
 

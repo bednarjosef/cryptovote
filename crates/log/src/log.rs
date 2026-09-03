@@ -10,6 +10,7 @@ use cv_core::crypto::hash::blake3_hash;
 use cv_core::crypto::merkle::{InclusionProof, prove_inclusion};
 use cv_core::items::*;
 use cv_core::registry::{RegistrySnapshot, RegistryTree, decode_leaves, encode_leaves};
+use cv_core::tally::LogView;
 use cv_core::validate::{Invalid, Reference, validate};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -18,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 pub const MAX_ORPHANS: usize = 10_000;
 /// Nullifier scope for node registrations (no vote/initiative).
 pub const NODE_SCOPE: Id = [0u8; 32];
-pub const SNAPSHOT_MAGIC: &[u8; 8] = b"CVSNAP01";
+pub use cv_core::snapshot::SNAPSHOT_MAGIC;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Accepted {
@@ -697,18 +698,50 @@ impl Log {
         self.archived.get(vote_id).map(|v| v.as_slice())
     }
 
+    // ------------------------------------------------------------------ node metadata
+
+    /// Node-level persistent state (pending anchor submissions etc.).
+    pub fn put_meta(&self, key: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        self.store.put_meta(&format!("node/{key}"), bytes)
+    }
+
+    pub fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.store.get_meta(&format!("node/{key}"))
+    }
+
+    pub fn delete_meta(&self, key: &str) -> Result<(), StoreError> {
+        self.store.put_meta(&format!("node/{key}"), &[])
+    }
+
+    pub fn meta_with_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        Ok(self
+            .store
+            .meta_with_prefix(&format!("node/{prefix}"))?
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| (k.trim_start_matches("node/").to_string(), v))
+            .collect())
+    }
+
     // ------------------------------------------------------------------ export
 
-    /// Snapshot of every item (SPEC §15).
+    /// Snapshot of every registry header and item (SPEC §15).
     pub fn export_snapshot(&self) -> Vec<u8> {
-        let mut w = cv_core::encoding::Writer::new();
-        w.fixed(SNAPSHOT_MAGIC);
-        w.list_len(self.order.len());
-        for hash in self.order.values() {
-            let item = &self.items[&self.by_hash[hash]];
-            w.bytes(&item.encode());
-        }
-        w.into_inner()
+        let regs: Vec<RegistrySnapshot> = self
+            .registries
+            .values()
+            .map(|e| e.snapshot.clone())
+            .collect();
+        let items: Vec<Vec<u8>> = self
+            .order
+            .values()
+            .map(|hash| self.items[&self.by_hash[hash]].encode())
+            .collect();
+        cv_core::snapshot::encode_snapshot(&regs, &items)
+    }
+
+    pub fn any_anchor_at_or_before(&self, height: u32) -> bool {
+        self.anchors().iter().any(|a| a.proof.height() <= height)
     }
 }
 
@@ -749,11 +782,64 @@ impl Context for Log {
         }
         Some(r.clone())
     }
-    fn derived_vote(&self, _initiative_id: &Id) -> Option<VoteDefinition> {
-        // Initiative → vote derivation is wired in Phase 6 (SPEC §13).
-        None
+    fn derived_vote(&self, initiative_id: &Id) -> Option<VoteDefinition> {
+        cv_core::tally::derive_vote(self, initiative_id)
     }
     fn block_merkle_root(&self, height: u32) -> Option<[u8; 32]> {
         self.headers.merkle_root(height)
+    }
+}
+
+impl LogView for Log {
+    fn ballots_of(&self, vote_id: &Id) -> Vec<Ballot> {
+        Log::ballots_of(self, vote_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+    fn supports_of(&self, initiative_id: &Id) -> Vec<Support> {
+        Log::supports_of(self, initiative_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+    fn witnesses_of(&self, content_id: &Id) -> Vec<Witness> {
+        Log::witnesses_of(self, content_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+    fn keyparties_of(&self, vote_id: &Id) -> Vec<KeyParty> {
+        Log::keyparties_of(self, vote_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+    fn shares_of(&self, keyparty_id: &Id) -> Vec<Share> {
+        Log::shares_of(self, keyparty_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+    fn anchored_height(&self, content_id: &Id) -> Option<u32> {
+        Log::anchored_height(self, content_id)
+    }
+    fn any_anchor_at_or_before(&self, height: u32) -> bool {
+        Log::any_anchor_at_or_before(self, height)
+    }
+    fn tip_height(&self) -> Option<u32> {
+        self.headers.tip_height()
+    }
+}
+
+/// Adapter so a `HeaderSource` can serve a `SnapshotView`.
+pub struct HeadersAdapter(pub Arc<dyn HeaderSource>);
+
+impl cv_core::snapshot::Headers for HeadersAdapter {
+    fn merkle_root(&self, height: u32) -> Option<[u8; 32]> {
+        self.0.merkle_root(height)
+    }
+    fn tip_height(&self) -> Option<u32> {
+        self.0.tip_height()
     }
 }

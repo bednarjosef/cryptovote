@@ -261,4 +261,19 @@ the mix path (Phase 7).
 **A27 — Storage** is `redb` (pure Rust, single file, ACID) for the Log and
 the disk-backed mix queues.
 
+**A43 — Direct anchors are operator-driven.** Broadcasting a Bitcoin
+transaction needs a funded wallet, which the reference node does not embed.
+The node offers `prepare-direct-anchor` (prints the root and the `OP_RETURN`
+script for everything not yet anchored) and `publish-direct-anchor` (builds
+the Anchor item from the confirmed raw transaction and its merkleblock
+proof). Verification of direct anchors is fully implemented.
+
+**A44 — Difficulty rules in the header chain.** Every header is checked for
+linkage and proof of work against its own target. Full retarget validation
+needs the window's first header; the chain enforces that the target changes
+only at 2016-block boundaries and by at most the 4× consensus clamp, which
+bounds what a lying header source could do (a header at the wrong difficulty
+is rejected; a valid-but-stale chain only delays anchors). Nodes additionally
+wait for 6 confirmations before using a header.
+
 **A28 — Receipt** is 8 Crockford-base32 characters of `H_B("receipt"; n || c)`.
