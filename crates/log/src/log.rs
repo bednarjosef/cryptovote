@@ -779,6 +779,7 @@ impl Context for Log {
             .get(&(*issuer_key, *root))
             .map(|e| RegistryInfo {
                 leaf_count: e.snapshot.leaf_count,
+                authority_keys: e.snapshot.authority_keys.clone(),
             })
     }
     fn vote(&self, id: &Id) -> Option<VoteDefinition> {

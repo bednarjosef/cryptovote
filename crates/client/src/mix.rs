@@ -409,19 +409,16 @@ impl MixClient {
             .vote(vote_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("unknown vote"))?;
-        let (_, leaves) = self
-            .node
-            .registry(&vd.issuer_key, &vd.registry_root)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("registry not available"))?;
-        let p: Participant = device
-            .participant(&vd.issuer_key, &leaves)
-            .ok_or_else(|| anyhow::anyhow!("device not enrolled in this registry"))?;
-        // The node served these leaves; they must build the root the vote names.
-        anyhow::ensure!(
-            p.registry_root == vd.registry_root,
-            "the leaves the node served do not build the vote's registry root"
-        );
+        // One Merkle path, not the electorate (A58). The path is checked
+        // against the root the vote names, so a node cannot make this device
+        // prove against a tree of its own.
+        let p: Participant = crate::participant::participant_via_path(
+            &self.node,
+            device,
+            &vd.issuer_key,
+            &vd.registry_root,
+        )
+        .await?;
         let ballot = prepare_ballot(&self.node, keys, &p, &vd, option, self.dev).await?;
         let bytes = Item::Ballot(ballot.clone()).encode();
         let mut exclude: Vec<[u8; 32]> = Vec::new();

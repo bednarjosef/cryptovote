@@ -408,11 +408,177 @@ exponentiation is `π = 1` when `2^T < l` (dev delays), so the structural
 check admits `π ∈ [1, N−1]`. The node's solver role starts one sequential
 job per party as soon as the registration is on the Log (whitepaper §10
 "solvers start at once"), bounded by `--solver-parallel`; the reference
-solver uses `num-bigint-dig` squarings (≈ 10⁵–10⁶ per second), so real
-delays sized for `S_MAX_RSA = 2^26` take far longer than the vote — which is
-the design: voluntary publication after close is the normal path. The
-client relaxes the delay requirement only in dev mode (`ParticipantClient::dev`).
-A ballot cast when no party is listed encrypts to the identity key
-(plaintext-equivalent) and the payload still carries an empty party list.
+solver uses `num-bigint-dig` squarings (measured 1.95 × 10⁵ per second on
+the development machine, 345× below `S_MAX_RSA = 2^26`), so real delays take
+far longer than the vote — see A53. The client relaxes the delay requirement
+only in dev mode (`ParticipantClient::dev`).
+
+**A52 — `min_parties` is a floor, not a default.** A `keyparties` ballot may
+declare any subset of the vote's key parties, and an *empty* one aggregates to
+the identity point: `c2 = option · G + r · 0 = option · G`, which anyone reads
+by the same table lookup the tally uses. That is a public ballot inside a
+secret vote — a direct failure of G4, independent of coercion (which the
+whitepaper already excludes from scope, §16.1). So the VoteDefinition carries
+`min_parties`, set by the Issuer, `0` under `none` and `1..=MAX_KEY_PARTIES`
+under `keyparties`, and a ballot declaring fewer is invalid.
+
+The check is on the ballot's own bytes only. It could instead have compared
+against the parties actually available, but that number depends on which
+anchors have surfaced, so a late-surfacing anchor would retroactively
+invalidate ballots that were correct when cast — the stranding A38 exists to
+avoid. The cost of the weaker check is that a coerced voter may still choose
+*which* parties to name; the cost of the floor itself is castability, since a
+vote whose volunteers never reach `min_parties` cannot be voted in at all.
+Clients fail loudly in that case (`ParticipantError::TooFewKeyParties`) rather
+than silently dropping to a smaller set.
+
+**A53 — Solvers force open only declared parties.** The counting rule needs
+the shares of `∪ b.party_ids` over the counted ballots and no others (SPEC
+§12), so a key party nobody encrypted to is never on the path to a result.
+Solving every registration instead would let anyone register key parties in
+bulk and bill the network one `T`-length sequential job apiece — A37's
+liveness cost, but unbounded, since such a registration would not have to
+survive client selection to be expensive. The node's solver therefore skips
+parties no ballot named.
+
+**A54 — Forced opening is a guarantee of existence, not of timeliness.**
+`required_delay` is sized so that hardware at `S_MAX_RSA` cannot finish before
+`close_block`; a solver `k`× slower than that therefore finishes about
+`k × 1.5` vote-lengths after the party registered. Measured on the development
+machine, the reference solver runs at 1.95 × 10⁵ squarings/s against an
+assumed `2^26`, i.e. `k ≈ 345`: an 8-day vote's `required_delay` of
+6.96 × 10¹³ squarings is 12 days at `S_MAX_RSA` and about 11 years here. An
+optimised Montgomery implementation closes perhaps one order of magnitude of
+that, not three.
+
+So whitepaper §10's "liveness never depends on key parties" holds only in the
+limit. In operation, a `keyparties` vote gets its result because every party
+publishes voluntarily at close; a single party that vanishes stalls the vote
+until somebody with hardware near `S_MAX_RSA` finishes, and nothing in the
+protocol obliges anyone to own such hardware. This is a named infrastructure
+assumption in the same sense as the OpenTimestamps calendars (A43), not a
+property the cryptography provides. Lowering `S_MAX_RSA` to a rate volunteers
+can match is not a fix: it lowers the bar for an adversary with real hardware
+to read the running count early, which is the attack the delay exists to
+prevent.
+
+**A55 — Key-party selection inherits the Issuers' Sybil resistance, and no
+more.** A key party proves membership in the vote's registry, so registrations
+are limited by that Issuer's willingness to enrol people. But an Issuer is
+just an Ed25519 key that signs a root (§4.3), and nodes accept any registry
+they are configured to store, so "how many key parties can one actor
+register" is bounded by nothing the protocol checks. Two consequences, both
+recorded rather than fixed:
+
+- **Grinding.** Clients select the `MAX_KEY_PARTIES` lowest `keyparty_id`s,
+  and that id is `blake3` of item bytes the party controls; re-randomising one
+  puzzle costs a single modular exponentiation. A party can aim at the
+  selected set, and enough parties can occupy all of it.
+- **Flooding.** Any selection rule over an open pool has this shape. Ordering
+  by an unpredictable beacon (a Bitcoin block hash at `open_block`, say) would
+  stop grinding, since the value does not exist when parties register — but an
+  actor holding a fraction `f` of registrations still captures every one of
+  `n` slots with probability about `fⁿ`, which is near 1 once they are most of
+  the pool. Unbiasable selection and Sybil resistance are different problems,
+  and only the first is solvable by a selection rule.
+
+Key-party secrecy is therefore bounded by the social recognition of Issuers:
+it holds against anyone who cannot mint credentials wholesale under a registry
+that nodes and voters accept. Removing the bound needs a construction with no
+committee at all (whitepaper §17).
+
+**A56 — A key party is anonymous on the Log but not on the wire.** The
+`KeyParty` item names nobody: membership is proved in zero knowledge, and the
+nullifier `poseidon(s, "keyparty", vote_id)` is scoped by both tag and vote, so
+it links neither to that person's ballot in the same vote nor to anything they
+do in another (A50). Two things leak outside the item:
+
+- **The address that submits it.** A registration is ~32 KB and does not fit a
+  Sphinx payload (`MAX_MESSAGE_LEN` ≈ 2 KB), so it cannot be mixed; it goes
+  direct, over Tor when the client has it (`--tor`). A `Share` is 97 bytes and
+  does go through the mix, among ballot traffic. Registering and later opening
+  are two observable acts by one party, which is why they do not take the same
+  path.
+- **Self-disclosure.** Announcing "I am a key party for this vote" is what
+  makes the role accountable, and it is also what makes the person coercible.
+  The protocol supports either choice and takes neither: whitepaper §16.6 no
+  longer recommends publicising it.
+
+The vote's creator is deliberately *not* auto-registered as a key party. It
+would guarantee `min_parties ≥ 1` is satisfiable and give one publicly
+accountable guarantor, but every key party can stall a vote by withholding its
+share (A54), so it would hand whoever defines a vote a veto over its result —
+a power the trust table says they do not have. A `keyparties` vote with too few
+volunteers is uncastable instead, which is a failure the Issuer can see coming
+rather than one it can cause.
+
+**A57 — The Issuer names who may call votes over its electorate.** A
+`VoteDefinition` of Authority origin used to be checked against
+`AUTHORITY_KEYS`, a deployment constant. Two things were wrong with that.
+Nothing tied an authority to an Issuer, so any key a deployment recognised
+could call a vote over *any* electorate, whose Issuer neither consented nor
+was told. And it was a constant compiled into nodes and verifiers: anyone
+could become an Issuer with no permission at all, but adding a vote caller
+meant shipping software to the whole network.
+
+The list now lives in the Registry snapshot, inside the signed payload, so it
+is the Issuer's statement about its own electorate and revoking a caller is an
+ordinary re-publish at the next epoch. A state that both defines the electorate
+and calls its votes lists its own key, and the two roles collapse into one
+without the protocol having to assume they always do. A deployment that wants
+an electoral commission genuinely independent of the population register lists
+the commission instead, and then the separation is a checkable fact rather
+than a convention.
+
+**Empty means initiatives only.** An Issuer that names nobody has an
+electorate in which no top-down vote can exist; the only way a vote arises is
+an Initiative its own members raise and support past the threshold (§13). This
+is the default for a new Issuer, so calling votes over other people's
+electorates is not something one forgets to turn off.
+
+What this does *not* do is make an Authority trustworthy. It is still trusted
+for creating votes, and the Issuer that names it is still trusted for the
+electorate; a government holding both keys has exactly the powers it had
+before. The change removes a way for unrelated parties to interfere and
+removes a centralisation point, not a trust assumption.
+
+**A58 — A client fetches its own Merkle path, not the electorate.** The
+membership proof needs one leaf's 32 siblings. The client used to download the
+whole leaves file and rebuild the tree, which is 32 bytes per registered person
+— 320 MB for ten million — on every cast, from a phone. It now fetches
+`GET /v1/registry/{issuer}/{root}/path/{commitment}`: `index(u32) || siblings`,
+1 028 bytes whatever the electorate's size.
+
+Nothing is given up. The old check was that the served leaves rebuild the
+signed root; the new one is that the served path rebuilds it, from
+`root_from_path(commitment, index, siblings)`. A node that lies about the index
+or any sibling produces a root that does not match the Issuer's signature, and
+is caught in the same place for the same reason. What the client no longer
+learns is every other person's commitment, which it had no use for.
+
+An Issuer still publishes the full leaves file once per epoch, and
+`POST /v1/registry` carries it in one body, capped at
+`MAX_REGISTRY_BODY_BYTES` (512 MiB) — enough for a continental electorate.
+Nodes serve `…/leaves` unchanged for anyone who wants to rebuild the tree
+themselves, which is how the root is audited.
+
+**A59 — Limits stated by the protocol must be reachable through the transport
+that carries it.** Two were not:
+
+- Axum's default request body limit is 2 MiB, well under `MAX_ITEM_BYTES`
+  (8 MiB), so the HTTP layer quietly rejected items the validity rules accept —
+  and, before A58, made a registry above roughly 65 000 people impossible to
+  publish at all (measured: 65 000 leaves accepted, 100 000 refused with 413).
+  Both routes now declare limits taken from the protocol's own constants.
+- `MAX_ANCHOR_LEAVES` was 1 000 000, i.e. 30 MiB of leaves inside an item
+  capped at 8 MiB. No anchor near it could ever encode, so the real ceiling was
+  262 144 and the constant described nothing. It is now 200 000, comfortably
+  under the item cap. Several anchors per block were always fine — §12 takes
+  the earliest height covering an item, whoever published it — so the smaller
+  figure costs nothing.
+
+Request timeouts and rate limiting are deliberately not attempted in-process;
+they belong to a reverse proxy, and pretending otherwise would suggest a node
+is safe to expose directly.
 
 **A28 — Receipt** is 8 Crockford-base32 characters of `H_B("receipt"; n || c)`.

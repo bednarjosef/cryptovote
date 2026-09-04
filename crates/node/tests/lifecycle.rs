@@ -51,15 +51,16 @@ async fn full_lifecycle_in_dev_mode() {
     let keys = Arc::new(groth16::setup(&mut ChaCha20Rng::from_seed(
         groth16::DEV_SETUP_SEED,
     )));
-    let issuer = Issuer::dev([0x11u8; 32]);
+    let mut issuer = Issuer::dev([0x11u8; 32]);
     let issuer_key = issuer.public_key();
     let authority = SigningKey::from_seed(&[0x42u8; 32]);
+    // This electorate accepts votes called by `authority` (SPEC §4.3, A57).
+    issuer.set_authority_keys(vec![authority.public_key()]);
     let chain = Arc::new(MockChain::new(100, 1.0));
     chain.set_tip(150);
 
     // Node with the dev anchorer.
     let deployment = Deployment {
-        authority_keys: vec![authority.public_key()],
         issuer_keys: vec![issuer_key],
         dev_mode: true,
     };
@@ -138,6 +139,7 @@ async fn full_lifecycle_in_dev_mode() {
             close_block: 200,
             min_ballots: 3,
             secrecy: Secrecy::None,
+            min_parties: 0,
             origin: Origin::Initiative {
                 initiative_id: [0; 32],
             },
@@ -213,6 +215,7 @@ async fn full_lifecycle_in_dev_mode() {
             "Ban leaf blowers".into(),
             180,
             Secrecy::None,
+            0,
         )
         .await
         .unwrap();
@@ -269,6 +272,41 @@ async fn full_lifecycle_in_dev_mode() {
         "derived votes use the protocol min_ballots of 100"
     );
     assert_eq!(r.counted, Some(4));
+
+    // Casting fetches this device's Merkle path, not the electorate (A58).
+    // The path is 1 028 bytes whatever the registry's size, and it is checked
+    // against the signed root, so a node cannot substitute a tree of its own.
+    let client = NodeClient::new(node_url.clone());
+    let commitment = devices[0].commitment();
+    let (index, siblings) = client
+        .registry_path(&issuer_key, &root, &commitment)
+        .await
+        .unwrap()
+        .expect("this device is enrolled");
+    assert_eq!(
+        cv_core::registry::root_from_path(commitment, index, &siblings),
+        root,
+        "the served path rebuilds the root the Issuer signed"
+    );
+    // A commitment nobody enrolled has no path.
+    assert!(
+        client
+            .registry_path(
+                &issuer_key,
+                &root,
+                &cv_core::crypto::field::fr_mod(&[0x99; 32])
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // A tampered sibling rebuilds a different root, which is the whole check.
+    let mut forged = siblings;
+    forged[0] = cv_core::crypto::field::fr_mod(&[0x77; 32]);
+    assert_ne!(
+        cv_core::registry::root_from_path(commitment, index, &forged),
+        root
+    );
 
     issuer.shutdown();
     node.shutdown().await;

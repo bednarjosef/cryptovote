@@ -17,7 +17,7 @@ This document specifies a voting protocol intended for frequent (weekly or month
 - G1. One eligible person, at most one counted ballot per vote.
 - G2. Nobody, including any group of operators, can forge, drop, alter, or backdate a ballot.
 - G3. Nobody can learn how any person voted, or whether a given person voted.
-- G4. When a vote is configured for secrecy, nobody can read any ballot before the deadline unless every volunteer key party colludes.
+- G4. When a vote is configured for secrecy, nobody can read any ballot before the deadline unless every volunteer key party that ballot named colludes — and no voter can waive this for their own ballot.
 - G5. Anyone can verify the result from public data with a small, independently implementable verifier.
 - G6. The vote resolves correctly at any turnout, and with any number of nodes (including one).
 - G7. Voters pay nothing, and by default nobody pays anything. There is no token.
@@ -42,7 +42,7 @@ Everything not listed here is trustless.
 | **Voter's device** | Casts the option the voter chose and protects the voter's secret. | Anything beyond that one voter's own ballot. |
 | **Bitcoin** | Provides an unforgeable public ordering of anchored roots (standard assumption: honest majority of hash power). | Read or alter ballots. Used only as a clock. |
 | **OpenTimestamps calendars** | Trusted **only for liveness**: that at least one of several independent calendars aggregates submitted hashes into Bitcoin in a timely way. | Forge, backdate, or omit-without-detection any timestamp; every proof they return is verified against Bitcoin directly. |
-| **Key parties** (votes with `secrecy: keyparties`) | Trusted **only for pre-deadline secrecy**, and only collectively: the running count stays hidden if **at least one** registered key party is honest. Anyone may register, including the voter. | Read identities; forge, drop, or alter ballots; delay the result (their shares can be forced open by anyone). Full collusion yields only an early anonymous count. |
+| **Key parties** (votes with `secrecy: keyparties`) | Trusted **for pre-deadline secrecy**, collectively: the running count stays hidden if **at least one** declared key party is honest. Also trusted, in practice, for the *timeliness* of the result — a withheld share can be forced open by anyone, but only on hardware near `S_max` (§10). Anyone may register, including the voter. | Read identities; forge, drop, or alter ballots; change the result or the deadline. Full collusion yields only an early anonymous count. |
 | **Cryptographic assumptions** | Soundness and zero-knowledge of the proof system; hardness of sequential squaring modulo an RSA integer; discrete log on the elliptic curve; collision resistance of the hash. | — |
 | **Mix nodes and Tor** | Trusted **only for privacy**, never for correctness. Full collusion of a voter's entire path degrades that voter's anonymity, not the result. | Affect the tally in any way. |
 
@@ -53,7 +53,7 @@ Everything not listed here is trustless.
 - **Issuer.** Verifies real-world identity once and maintains a Registry (§5), identified by its signing key `issuer_key`. Several Issuers may coexist; each vote names exactly one. Has no other role.
 - **Participant.** A person holding a secret `s` on their device. Can vote, author initiatives, support initiatives, register a node, and register as a key party.
 - **Node.** Any machine storing and relaying the Log (§6). Optionally acts as a mix hop, an anchorer, or a solver. Anyone may run one.
-- **Key party.** A participant who, for one vote, publishes a public key share and a timed commitment of the matching secret (§10). Votes configured for secrecy are encrypted to the aggregate of all key parties' keys.
+- **Key party.** A participant who, for one vote, publishes a public key share and a timed commitment of the matching secret (§10). Ballots in a vote configured for secrecy are encrypted to the aggregate of the key parties they name, never fewer than the vote's `min_parties`.
 - **Anchorer.** A node that gets a root of its Log view committed into Bitcoin, by default for free through OpenTimestamps calendars, optionally by paying for a direct transaction.
 - **Solver.** Anyone who forces open a key party's timed commitment by sequential computation, guaranteeing that results never depend on a key party's cooperation.
 - **Verifier.** Anyone who recomputes a result from the Log.
@@ -145,19 +145,20 @@ open_block     : Bitcoin block height at which ballots become valid
 close_block    : Bitcoin block height; ballots must be anchored at or before it
 min_ballots    : minimum valid ballots for a result to be published
 secrecy        : none | keyparties
+min_parties    : key parties every ballot must encrypt to (0 under `none`)
 origin         : either an authority signature, or an initiative_id that reached threshold
 ```
 
 **Secrecy modes.**
 
 - `none` — ballots carry the option index in plaintext. The running count is public by design. No key parties exist.
-- `keyparties` — ballots are encrypted to the aggregate key of all registered key parties (§10). Nothing can be read before close unless every key party colludes.
+- `keyparties` — ballots are encrypted to the aggregate key of the registered key parties (§10). Nothing can be read before close unless every key party a ballot named colludes. The vote also fixes `min_parties`, the number of key parties every ballot must encrypt to: it is a floor on the voter, not a default, so no one can cast a readable ballot into a secret vote. If fewer than `min_parties` register in time, the vote cannot be cast at all.
 
 Verifiers display the mode alongside any result.
 
 **Two ways a vote is created**
 
-1. **Authority.** A recognized public key (e.g. a parliament) signs a definition.
+1. **Authority.** A public key the Issuer has named in its signed Registry snapshot (e.g. a parliament, or the Issuer itself) signs a definition. Who may call votes over an electorate is that electorate's Issuer to decide, and an Issuer that names nobody holds only initiatives.
 2. **Initiative.** When an `Initiative` has ≥ `N` distinct valid `Support` items anchored before its support deadline, a `VoteDefinition` is **derived deterministically** from the initiative: its text becomes the question, and `open_block = support_deadline + 144` (about one day), so that a late-published earlier anchor cannot change the derived `vote_id`. No one authors it, so no one can alter the wording or timing.
 
 ---
@@ -169,7 +170,7 @@ To vote in `vote_id`, the device:
 1. Computes the nullifier `n = H(s, "ballot", vote_id)`.
 2. Forms the payload `c`:
    - `secrecy: none` → `c = option index`.
-   - `secrecy: keyparties` → `c = ElGamal_PK(option; r)` with deterministic randomness `r = H(s, "rand", vote_id)`, where `PK` is the aggregate key of all valid `KeyParty` items for this vote (§10).
+   - `secrecy: keyparties` → `c = ElGamal_PK(option; r)` with deterministic randomness `r = H(s, "rand", vote_id)`, where `PK` is the aggregate key of the `KeyParty` items the ballot names — at least `min_parties` of them, listed in the ballot (§10). A ballot naming fewer is invalid.
 3. Produces `π` proving membership in `registry_root` and correct derivation of `n`, bound to the content hash of `(vote_id, n, c)`.
 4. Emits `Ballot = { vote_id, n, c, π }`.
 
@@ -229,12 +230,14 @@ T_i ≥ (close_block − anchor_height_of_KeyParty) × 600 s × S_max × M      
 
 where `S_max` is the assumed squarings-per-second of the fastest hardware anyone could build and `M` is a safety margin. A party that registers early simply needs a longer delay. Because a weak or malformed `N_i` only weakens that party's own share, no proof of modulus quality is required.
 
-**Aggregate key.** `PK = Σ pk_i` over all valid `KeyParty` items for the vote. It is fixed at `open_block` and is what every ballot encrypts to.
+**Aggregate key.** `PK = Σ pk_i` over the valid `KeyParty` items a ballot names — at least `min_parties` of them, and at most a per-ballot cap, since anchors for blocks before `open_block` routinely surface after it and no two clients see the same set at open. Each ballot therefore records the parties it encrypted to, and decryption of that ballot needs exactly those shares.
+
+Which parties a client picks out of the pool is a Sybil question, and the protocol has no Sybil resistance of its own: an `Issuer` is any Ed25519 key that signs a registry root, so credentials — and the key parties they authorise — are as cheap as the willingness of nodes to store another registry. Anyone who can flood the pool can occupy the whole selected set. Key-party secrecy is thus bounded by the *social* recognition of Issuers, not by anything the protocol enforces; §16 states this as a limitation and §17 names the constructions that would remove it.
 
 **Opening.** Decryption requires `SK = Σ sk_i`, i.e. every share. Shares become public in either of two ways:
 
 - **Voluntary.** After `close_block`, a party publishes a `Share` item containing `sk_i`. Honest parties do this, making the result available immediately at close.
-- **Forced.** From the moment a `KeyParty` item exists, any solver may begin forcing its VTC open (`T_i` sequential squarings on one core; one job per party, never per ballot). Solvers start at once as a matter of course, so every share is available by about `close_block` even if its party vanishes.
+- **Forced.** From the moment a `KeyParty` item exists, any solver may begin forcing its VTC open (`T_i` sequential squarings on one core; one job per party, never per ballot, and only for parties some ballot actually named). `T_i` is sized so that hardware at `S_max` cannot finish before close — so a solver *below* `S_max` cannot either, by the same factor. On general-purpose hardware that factor is two to three orders of magnitude, putting a forced opening months to years past close. Forcing guarantees that a result exists; it does not guarantee when. A party that vanishes delays the vote until a solver with hardware near `S_max` completes.
 
 A `Share` is valid iff `sk_i · G = pk_i`. No further proof is needed.
 
@@ -249,7 +252,7 @@ The result is a pure function of public data. Any verifier can recompute it; no 
 **Properties.**
 
 - Secrecy until close holds if **any one** key party is honest, since all shares are needed. A voter who wants certainty registers as a key party for that vote.
-- Liveness never depends on key parties, since every share can be forced by anyone.
+- Liveness is *eventually* independent of key parties, since every share can be forced by anyone. It is not independent of them on the timescale of the vote: absent a solver near `S_max`, the practical path to a result is that every party publishes voluntarily at close.
 - If every key party colludes, or if all shares are forced early by hardware faster than `S_max × M`, the attacker learns only the running count of anonymous ballots. Identities and integrity are unaffected.
 - An attacker holding `k` credentials can register `k` uncooperative parties, costing solvers `k` parallel `T`-length jobs. This is a bounded liveness cost, not a secrecy or integrity risk.
 
@@ -294,8 +297,9 @@ The network layer affects **only privacy**, never correctness.
 | Any number of nodes, however large a majority | Degrade availability; attempt deanonymization via traffic if they also hold a voter's full path. | Forge, drop (given one honest node), backdate, or alter counted ballots; change results; open encrypted ballots early. Nothing a node signs enters the count, so no quorum of them has any standing. |
 | Any anchorer | Choose what to include in its own anchor. | Backdate, validate, or invalidate any ballot. |
 | OTS calendars (all colluding) | Delay or refuse service, stalling the free path until someone anchors directly. | Forge or backdate a proof; affect any ballot or result. |
-| Any single key party | Publish or withhold its own share (withholding only delays until a solver forces it). | Read anything alone; affect any ballot or the deadline. |
-| All key parties colluding, or a solver with hardware beyond `S_max × M` | See the anonymous running count before close. | Learn who voted how; forge, drop, or alter ballots; move the deadline. |
+| Any single key party | Publish or withhold its own share. Withholding delays the vote until a solver near `S_max` forces it — months to years on ordinary hardware. | Read anything alone; affect any ballot, the result, or the deadline. |
+| All key parties **a ballot named** colluding, or a solver with hardware beyond `S_max × M` | See that ballot, and with enough ballots the anonymous running count, before close. | Learn who voted how; forge, drop, or alter ballots; move the deadline. |
+| Anyone able to stand up Issuers | Register key parties in bulk and occupy the whole set a ballot selects, then read it — or withhold and stall. | Nothing, in a vote whose Issuers are ones people actually recognise. |
 | Full mix-path collusion for one voter | Link that voter's IP to their ballot. | Affect the result. |
 | Malware on a voter's device | Miscast that voter's ballot. | Affect any other voter. |
 
@@ -313,6 +317,8 @@ The network layer affects **only privacy**, never correctness.
 | `T_cap` | 3 × the longest vote length permitted by the authority |
 | Initiative open delay | `support_deadline + 144` blocks |
 | `min_ballots` | 100 |
+| `min_parties` | set per vote by the Issuer; `0` under `none`, `1`–32 under `keyparties` |
+| Key parties per ballot | at most 32 |
 | Anchoring cadence (per anchorer) | hourly during open votes |
 | OTS calendars per submission | 3 (independent operators) |
 | Initiative threshold `N` | 1 % of Registry size |
@@ -337,17 +343,23 @@ The network layer affects **only privacy**, never correctness.
 3. **Issuer trust.** The Issuer defines the electorate. Everything else is verifiable; this is not.
 4. **Network-level adversary.** An observer controlling ISPs and most registered nodes can attempt statistical timing correlation. Delays, decoys, and guards raise the cost; they do not eliminate it.
 5. **Public ballot contents after opening.** In both secrecy modes, individual ballot contents are public after close (immediately under `none`, after opening under `keyparties`). Any metadata leak is therefore a full leak for that ballot. Homomorphic tallying (§17) would remove this.
-6. **Secrecy before close is trust-minimized, not trustless.** It fails only if every key party colludes, but that is an assumption about people, not mathematics. Anyone can remove the assumption for themselves by registering as a key party.
-7. **Timing fuzziness.** The close drifts with Bitcoin block variance. Under `keyparties`, results appear when the last share is available: immediately if all parties publish, otherwise when the slowest forced opening completes, which is sized to land at about close.
+6. **Secrecy before close is trust-minimized, not trustless.** It fails only if every key party a ballot named colludes — but that is an assumption about people, not mathematics, and it is only as strong as the Sybil resistance of the Issuers those parties prove membership in. Since anyone can stand up an Issuer, a party willing to mint credentials in bulk can occupy the set a ballot selects. Registering as a key party yourself improves the odds; under a per-ballot cap it does not make them certain, because your own registration is not guaranteed to be among the ones your client selects. Note also that a key party is anonymous on the Log — the role is proved in zero knowledge and names nobody — so announcing it is what makes someone accountable for a vote's secrecy and equally what makes them worth coercing (A56). §17 names the constructions that would replace this assumption with a computational one.
+7. **Timing fuzziness.** The close drifts with Bitcoin block variance. Under `keyparties`, results appear when the last share is available: immediately if every party publishes, otherwise when the slowest forced opening completes. That is sized to land at about close *for a solver at `S_max`*; a solver on general-purpose hardware is two to three orders of magnitude slower, so a single vanished party can withhold a result for far longer than the vote itself. Practical timeliness therefore rests on parties publishing voluntarily, or on someone running purpose-built hardware.
 
 ---
 
 ## 17. Future work
 
 - **Delegation** (liquid democracy): signed, revocable, per-topic delegation resolved at tally time, with direct votes overriding.
+- **Replacing the key parties.** `secrecy: keyparties` buys secrecy from an assumption about people, and §16.6 bounds how far that assumption goes. Three constructions would replace it; none is a drop-in, and each fails differently. All three keep Bitcoin: anchoring proves a ballot existed *before* the deadline, and none of these proves anything of the kind — they only keep a ballot unreadable *until* it. The two are duals, and a vote needs both.
+
+  - **Homomorphic time-lock puzzles** (Malavolta–Thyagarajan, CRYPTO 2019). Each ballot is its own puzzle; puzzles add without opening, so the whole election collapses to one puzzle and one sequential solve. No committee, so nothing to flood — the Sybil question of A55 stops existing. Only the *sum* is ever solved, so individual ballots never open and §16.5 goes with it. The cost is latency: the delay is set by the earliest ballot, all puzzles must share one `T` to be addable, and the sum does not exist until close — so the count lands at `close + 1.5 ×` the voting window, always, with no fast path. Ten days for a week-long vote at the fastest hardware imaginable; the parameter is linear in the window, so this construction wants votes measured in hours, not weeks. Still needs public parameters of unknown factorisation (class groups avoid a ceremony; the homomorphic layer over them is thin) and a per-ballot validity proof, or a voter encodes a billion votes for their option.
+
+  - **Delay encryption** (Burdges–De Feo, EUROCRYPT 2021). "Time-lock identity-based encryption": ballots encrypt to an identity, and extracting its key takes a long chain of isogenies that anyone may walk. Because extraction runs *during* the vote rather than after it, the count is ready at close — no latency penalty at all. Its distributed setup is the best fit for this protocol of anything surveyed: participants chain pseudorandom isogeny walks with proofs of knowledge, one honest contributor suffices, no prior registration is needed, each contribution takes seconds, and the ceremony is updatable, so trust accumulates instead of expiring. That is the open participation §16.6 cannot otherwise offer. What rules it out today is storage: the evaluation key grows at about 3.75 GB per second of delay and must be streamed at that rate — 13.5 TB for a one-hour window, 324 TB for a day — and the paper is explicit that the trick that shrinks a VDF's storage does not apply to delay encryption. It is also not quantum-resistant, and the setup's zero-knowledge rests on a non-falsifiable assumption the authors flag for scrutiny. Worth revisiting if someone finds a compact representation of very long isogeny chains, which the authors name as an open problem.
+
+  - **Threshold timelock encryption** (`tlock`, Gailly–Melissaris–Romailler 2023). The same Boneh–Franklin IBE, but the master secret is held by an existing threshold network — the League of Entropy, in production since 2020, 23 nodes run by unrelated companies, universities and foundations, already carrying Filecoin. Ballots encrypt to a future round; the network's BLS signature on that round *is* the decryption key, and the network never learns it is being used. Alone among the three it is deployable now, needs no delay hardware, and returns the result the moment the round is signed. It is not trustless — it trades a per-vote committee for a permanent global one — but that is precisely the point: a committee the vote's own adversary cannot flood, because membership has nothing to do with the electorate and no relation to any particular vote. The integration cost is a clock mismatch. This protocol's deadline is a Bitcoin height whose wall-clock arrival varies by hours, while a round is wall-clock; if the round fires first, the running count leaks. The fix is to make the round the deadline and let Bitcoin prove anteriority against block timestamps rather than heights, which aligns both clocks to the same quantity. Like the others, it is broken by a quantum computer.
+
 - **Everlasting privacy**: perfectly hiding commitments on the Log with separately held, eventually deleted encryptions.
-- **Homomorphic tallying**: exponential ElGamal with per-ballot validity proofs so that only per-option totals are ever decrypted and individual ballots never open.
-- **Trustless secrecy**: delay encryption (Burdges–De Feo, EUROCRYPT 2021) or homomorphic time-lock puzzles in class groups would remove the key-party assumption entirely; neither has a production-grade implementation today, and the former requires a one-time trusted setup ceremony.
 - **Coercion resistance**: fake-credential schemes (JCJ/Civitas family) adapted to the nullifier design.
 - **Sortition-based ordering**: replacing Bitcoin anchoring with a randomly drawn committee of verified participants, once such consensus is practical at scale.
 - **Non-institutional identity roots**: web-of-trust or proof-of-personhood Issuers, which the `issuer_key` mechanism already accommodates once such a backend exists.

@@ -7,8 +7,8 @@
 //! recomputed by an independent verifier from a snapshot (§15). These tests
 //! run a real three-node cluster over HTTP and try to break exactly that.
 
-use axum::extract::State;
-use axum::http::header;
+use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -54,12 +54,11 @@ fn world() -> World {
         .collect();
     let tree = RegistryTree::from_leaves(secrets.iter().map(commitment).collect());
     let issuer = SigningKey::from_seed(&[0x11u8; 32]);
-    let snapshot = RegistrySnapshot::sign(&issuer, 1, &tree);
     let authority = SigningKey::from_seed(&[0x42u8; 32]);
+    let snapshot = RegistrySnapshot::sign(&issuer, 1, &tree, vec![authority.public_key()]);
     // No Issuer allowlist: the nodes carry any registry anyone publishes,
     // which is the harder case to defend.
     let deployment = Deployment {
-        authority_keys: vec![authority.public_key()],
         issuer_keys: Vec::new(),
         dev_mode: true,
     };
@@ -74,6 +73,7 @@ fn world() -> World {
             close_block: 200,
             min_ballots: 1,
             secrecy: Secrecy::None,
+            min_parties: 0,
             origin: Origin::Initiative {
                 initiative_id: [0; 32],
             },
@@ -458,7 +458,14 @@ async fn an_unrecognised_issuer_is_isolated_from_another_electorate() {
     let attacker = fr_mod(&[0xC0u8; 32]);
     let rogue_tree =
         RegistryTree::from_leaves(vec![commitment(&attacker), commitment(&w.secrets[1])]);
-    let rogue_snapshot = RegistrySnapshot::sign(&rogue_issuer, 1, &rogue_tree);
+    // The rogue Issuer names the same authority, so its electorate really can
+    // hold a vote — the point of the test is that it is a *different* one.
+    let rogue_snapshot = RegistrySnapshot::sign(
+        &rogue_issuer,
+        1,
+        &rogue_tree,
+        vec![w.authority.public_key()],
+    );
     honest
         .post_registry(&rogue_snapshot, rogue_tree.leaves())
         .await
@@ -614,6 +621,35 @@ async fn spawn_liar(liar: Liar) -> (String, tokio::task::JoinHandle<()>) {
                 octets(cv_core::registry::encode_leaves(&l.leaves))
             }),
         )
+        // The path a client actually asks for (A58), served out of the liar's
+        // own tree rather than the one the Issuer signed.
+        .route(
+            "/v1/registry/{issuer}/{root}/path/{commitment}",
+            get(
+                |State(l): State<Liar>, Path((_, _, c)): Path<(String, String, String)>| async move {
+                    let Some(c) = hex::decode(&c)
+                        .ok()
+                        .and_then(|v| v.try_into().ok())
+                        .and_then(|b: [u8; 32]| cv_core::crypto::field::fr_from_canonical(&b))
+                    else {
+                        return StatusCode::NOT_FOUND.into_response();
+                    };
+                    let tree = cv_core::registry::RegistryTree::from_leaves(l.leaves.clone());
+                    let Some(index) = l.leaves.iter().position(|x| *x == c) else {
+                        return StatusCode::NOT_FOUND.into_response();
+                    };
+                    let Some(siblings) = tree.path(index as u32) else {
+                        return StatusCode::NOT_FOUND.into_response();
+                    };
+                    let mut w = cv_core::encoding::Writer::new();
+                    w.u32(index as u32);
+                    for sib in &siblings {
+                        w.fr(sib);
+                    }
+                    octets(w.into_inner())
+                },
+            ),
+        )
         .route(
             "/v1/votes/{id}/nullifier/{n}",
             get(|State(l): State<Liar>| async move {
@@ -724,8 +760,9 @@ async fn a_lying_node_cannot_redirect_or_bury_a_ballot() {
     ));
     assert!(pc_liar.cast(&device(&w, 1), &vid, 0).await.is_err());
 
-    // 2. The forged leaves carry the Issuer's real signature over a different
-    //    root, so the device refuses to prove membership against them.
+    // 2. The liar serves a path out of its own tree. It rebuilds *its* root,
+    //    not the one the Issuer signed, so the device refuses to prove
+    //    membership against it (A58).
     assert!(matches!(
         pc_liar
             .participant(&device(&w, 1), &w.issuer.public_key(), &w.tree.root())
@@ -737,7 +774,7 @@ async fn a_lying_node_cannot_redirect_or_bury_a_ballot() {
     let rogue = SigningKey::from_seed(&[0x66u8; 32]);
     let (url2, task2) = spawn_liar(Liar {
         item: Item::VoteDefinition(decoy).encode(),
-        snapshot: RegistrySnapshot::sign(&rogue, 1, &w.tree),
+        snapshot: RegistrySnapshot::sign(&rogue, 1, &w.tree, vec![w.authority.public_key()]),
         leaves: w.tree.leaves().to_vec(),
         fake_anchor: None,
     })

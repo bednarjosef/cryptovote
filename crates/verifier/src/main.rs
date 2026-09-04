@@ -1,4 +1,4 @@
-//! `cv-verifier` CLI: `cv-verifier --snapshot log.snap --headers headers.bin --authority-key HEX --vk membership.vk`
+//! `cv-verifier` CLI: `cv-verifier --snapshot log.snap --headers headers.bin --vk membership.vk`
 #![forbid(unsafe_code)]
 
 use clap::Parser;
@@ -27,8 +27,6 @@ struct Args {
     #[arg(long = "issuer-key")]
     issuer_keys: Vec<String>,
     /// Authority public keys (hex, repeatable).
-    #[arg(long = "authority-key")]
-    authority_keys: Vec<String>,
     /// Verifying key file (compressed arkworks encoding). Required unless --dev.
     #[arg(long)]
     vk: Option<PathBuf>,
@@ -65,11 +63,6 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let deployment = Deployment {
-        authority_keys: args
-            .authority_keys
-            .iter()
-            .map(|k| key(k))
-            .collect::<Result<_, _>>()?,
         issuer_keys: args
             .issuer_keys
             .iter()

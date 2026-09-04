@@ -1,6 +1,7 @@
 //! Phase 2: registry tree, Poseidon parameters, membership proofs.
 
 use ark_ff::PrimeField;
+use cv_core::constants::{MAX_AUTHORITY_KEYS, MAX_REGISTRY_SNAPSHOT_BYTES};
 use cv_core::crypto::field::{Fr, fr_mod, tag_field};
 use cv_core::crypto::groth16::{self, dev_keys};
 use cv_core::crypto::poseidon;
@@ -100,12 +101,30 @@ fn registry_tree_roots_and_paths() {
 
     // Snapshot signing.
     let issuer = SigningKey::from_seed(&[3u8; 32]);
-    let snap = RegistrySnapshot::sign(&issuer, 5, &tree);
+    let snap = RegistrySnapshot::sign(&issuer, 5, &tree, Vec::new());
     assert!(snap.verify());
     assert!(snap.verify_by(&issuer.public_key()));
     // Signed by this Issuer, but not by the one the caller expected.
     assert!(!snap.verify_by(&SigningKey::from_seed(&[4u8; 32]).public_key()));
     assert_eq!(RegistrySnapshot::decode(&snap.encode()).unwrap(), snap);
+
+    // The snapshot is variable-length now, so nothing may assume a constant
+    // size: a full authority list must survive both the wire (where the leaves
+    // file follows it) and the verifier's snapshot format (SPEC §15).
+    let full: Vec<[u8; 32]> = (0..MAX_AUTHORITY_KEYS as u8).map(|i| [i; 32]).collect();
+    let big = RegistrySnapshot::sign(&issuer, 5, &tree, full.clone());
+    let encoded = big.encode();
+    assert_eq!(encoded.len(), MAX_REGISTRY_SNAPSHOT_BYTES);
+    assert!(big.verify(), "authority_keys are inside the signed payload");
+    // Decoding from a prefix, as the node's /v1/registry endpoint must.
+    let mut wire = encoded.clone();
+    wire.extend_from_slice(b"leaves file follows");
+    let (parsed, used) = RegistrySnapshot::decode_prefix(&wire).unwrap();
+    assert_eq!((parsed, used), (big.clone(), encoded.len()));
+    // A changed authority list breaks the signature.
+    let mut tampered = big.clone();
+    tampered.authority_keys.pop();
+    assert!(!tampered.verify());
     let mut bad = snap.clone();
     bad.leaf_count += 1;
     assert!(!bad.verify());

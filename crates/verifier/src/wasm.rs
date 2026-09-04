@@ -1,6 +1,6 @@
 //! Browser entry point. `verify_snapshot(snapshot, headers, config_json)`
 //! returns the report as JSON. `config_json`: `{"issuer_keys": [hex],
-//! "authority_keys": [hex], "dev_mode": bool, "mock_tip": u32?, "vk": hex?}`.
+//! "dev_mode": bool, "mock_tip": u32?, "vk": hex?}`.
 //! `issuer_keys` is optional: empty means "every Issuer in the snapshot",
 //! and each result names the Issuer it was computed under.
 
@@ -18,7 +18,6 @@ struct JsConfig {
     #[serde(default)]
     issuer_keys: Vec<String>,
     #[serde(default)]
-    authority_keys: Vec<String>,
     #[serde(default)]
     dev_mode: bool,
     mock_tip: Option<u32>,
@@ -36,11 +35,6 @@ fn key(s: &str) -> Result<[u8; 32], String> {
 fn run(snapshot: &[u8], headers: &[u8], config_json: &str) -> Result<Report, String> {
     let cfg: JsConfig = serde_json::from_str(config_json).map_err(|e| e.to_string())?;
     let deployment = Deployment {
-        authority_keys: cfg
-            .authority_keys
-            .iter()
-            .map(|k| key(k))
-            .collect::<Result<_, _>>()?,
         issuer_keys: cfg
             .issuer_keys
             .iter()

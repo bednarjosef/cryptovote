@@ -107,7 +107,7 @@ Every signature in this protocol is over a **domain-prefixed message**:
 | Purpose | Message |
 |---|---|
 | VoteDefinition (authority) | `"cryptovote/v1/sig/vote" || vote_id` |
-| Registry root (issuer) | `"cryptovote/v1/sig/registry" || epoch(u64) || leaf_count(u64) || root(Fr)` |
+| Registry root (issuer) | `"cryptovote/v1/sig/registry" || epoch(u64) || leaf_count(u64) || root(Fr) || authority_keys(list<[32]>)` |
 | Node transport (mix, gossip) | `"cryptovote/v1/sig/transport" || …` (Phase 7) |
 
 ### 1.7 Ristretto255
@@ -278,9 +278,18 @@ A Merkle path for index `i` is `siblings: [Fr; 32]` (level 0 first).
 The Issuer publishes, per epoch `t`:
 
 ```
-RegistrySnapshot := epoch(u64) || leaf_count(u64) || root(Fr) || issuer_key([32]) || signature([64])
+RegistrySnapshot := epoch(u64) || leaf_count(u64) || root(Fr) || issuer_key([32])
+                 || authority_keys(list<[32]>)            -- ≤ MAX_AUTHORITY_KEYS (64)
+                 || signature([64])
 leaves file     := C_0 || C_1 || … || C_{leaf_count-1}      (32 bytes each)
 ```
+
+`authority_keys` are the keys this Issuer accepts as creators of top-down
+votes over its electorate (§6.1). It is signed with the root, so it is the
+Issuer's statement and nobody else's, and it is per snapshot, so revoking a
+caller is an ordinary re-publish. **Empty means empty**: that electorate holds
+no Authority-origin votes at all, and the only way a vote arises in it is an
+Initiative its own members raise (A57).
 
 `signature` is Ed25519 over the registry message of §1.6. Nodes verify
 `root` by recomputing the tree from the leaves file, and verify `signature`
@@ -326,6 +335,14 @@ One circuit serves all five proof-bearing items.
 
 **Private inputs:** `s`, `siblings[32]`, `index_bits[32]`.
 
+A client obtains `siblings` and `index` from
+`GET /v1/registry/{issuer}/{root}/path/{commitment}` — `index(u32) ||
+siblings(32 × Fr)`, 1 028 bytes whatever the electorate's size — and must check
+`root_from_path(commitment, index, siblings) == root` before proving against
+it. Downloading the leaves file and rebuilding the tree is the same check at
+32 bytes per registered person, and is what nodes do when they audit a root
+(§4.3); a client has no reason to pay for it (A58).
+
 **Constraints:**
 
 ```
@@ -368,6 +385,7 @@ body := question(string)
      || close_block(u32)
      || min_ballots(u32)
      || secrecy(u8)                  -- 0x00 none | 0x01 keyparties
+     || min_parties(u32)             -- key parties every ballot must encrypt to
      || origin(enum)
 origin := 0x00 || authority_key([32]) || signature([64])       (Authority)
         | 0x01 || initiative_id([32])                          (Initiative)
@@ -383,8 +401,9 @@ Validity:
 - [ ] `2 ≤ options.len() ≤ MAX_OPTIONS (64)`; every option non-empty and pairwise distinct; `question` non-empty.
 - [ ] `open_block < close_block`, `close_block − open_block ≤ MAX_VOTE_BLOCKS (52 560)`.
 - [ ] `secrecy ∈ {0x00, 0x01}`.
+- [ ] `min_parties == 0` when `secrecy = none`; `1 ≤ min_parties ≤ MAX_KEY_PARTIES` when `secrecy = keyparties` (A52).
 - [ ] `registry_root` is the root of a known Registry snapshot **of `issuer_key`**: a snapshot with that root carrying a valid signature by that key (referenced object, §4.3).
-- [ ] Authority origin: `authority_key ∈ AUTHORITY_KEYS` (deployment constant, TRUST: authority for *creating* votes only); Ed25519 verifies over the vote message (§1.6).
+- [ ] Authority origin: `authority_key ∈ authority_keys` of the snapshot named by `(issuer_key, registry_root)` — the Issuer's own list, not a node's configuration (A57; TRUST: authority for *creating* votes only); Ed25519 verifies over the vote message (§1.6).
 - [ ] Initiative origin: the referenced Initiative exists and is valid, and the item bytes equal `canonical(derive_vote(initiative))` of §13 evaluated on the node's current view. If the threshold is not yet reached the item is held in the orphan pool (§7.2), not rejected.
 
 `vote_id` covers `issuer_key`, so the same question over two Issuers'
@@ -392,6 +411,15 @@ registries is two different votes with independent nullifiers (A47).
 
 Under `secrecy = none` the running count is public by design: every ballot
 carries its option index in the clear.
+
+Under `secrecy = keyparties` the Issuer additionally fixes `min_parties`, the
+number of key parties every ballot must encrypt to. It is a *floor on the
+voter*, not a hint: a ballot declaring fewer is invalid (§6.4). Without it a
+ballot could declare an empty set, whose aggregate key is the identity point,
+leaving the option index in the clear — a public ballot inside a secret vote
+(A52). The Issuer trades secrecy for castability here: if fewer than
+`min_parties` key parties are ever anchored before `open_block`, no valid
+ballot can be built and the vote yields no result.
 
 ### 6.2 Initiative (0x02)
 
@@ -402,6 +430,7 @@ body := text(string)
      || threshold_N(u32)
      || support_deadline_block(u32)
      || secrecy(u8)                -- secrecy of the vote derived from this initiative
+     || min_parties(u32)           -- and its key-party floor (§6.1)
      || author(Fr)                 -- P
      || proof([128])
 initiative_id = content_id = blake3(item bytes without the trailing proof)
@@ -409,7 +438,7 @@ initiative_id = content_id = blake3(item bytes without the trailing proof)
 
 Validity:
 
-- [ ] `text` non-empty; `secrecy ∈ {0x00, 0x01}`.
+- [ ] `text` non-empty; `secrecy ∈ {0x00, 0x01}`; `min_parties` as in §6.1.
 - [ ] `registry_root` known under `issuer_key` (as 6.1).
 - [ ] `threshold_N == initiative_threshold(registry_size(issuer_key, registry_root))` (§14).
 - [ ] `proof` verifies with public inputs `[registry_root, author, tag("author"), fr_mod(issuer_key), fr_mod(initiative_id)]`.
@@ -463,7 +492,11 @@ Validity (intrinsic):
 
 - [ ] Referenced VoteDefinition exists and is valid (else orphan pool).
 - [ ] `secrecy = none`: `payload.len() == 1` and `payload[0] < options.len()`.
-- [ ] `secrecy = keyparties`: `payload` parses as above; every id in `party_ids` is the `content_id` of a valid KeyParty item for this `vote_id` (else orphan pool); `c1`, `c2` canonical points.
+- [ ] `secrecy = keyparties`: `payload` parses as above; `party_ids.len() ≥ vote.min_parties` (A52); every id in `party_ids` is the `content_id` of a valid KeyParty item for this `vote_id` (else orphan pool); `c1`, `c2` canonical points.
+
+  The floor is checked on the ballot's own bytes and never on anchor state, so
+  a ballot valid when cast stays valid however late other anchors surface
+  (A38).
 - [ ] `proof` verifies with `[vote.registry_root, nullifier, tag("ballot"), fr_mod(vote_id), fr_mod(ballot_id)]`.
 
 Counted iff, additionally (§12): anchored at height ≤ `close_block`; unique
@@ -482,7 +515,11 @@ anchor_id = content_id = blake3(item bytes)        (no proof stripping: anchors 
 ```
 
 `leaves` are `content_id`s (of any item type), **strictly ascending** by byte
-order, no duplicates, `1 ≤ len ≤ MAX_ANCHOR_LEAVES (1 000 000)`.
+order, no duplicates, `1 ≤ len ≤ MAX_ANCHOR_LEAVES (200 000)`. The cap is
+bounded by `MAX_ITEM_BYTES`: an Anchor is its own leaves, so a larger figure
+would describe anchors that cannot be encoded (A59). Several anchors covering
+the same block are normal — §12 takes the earliest height covering an item,
+whoever published it.
 `root = anchor_root(leaves)` (§8) is not stored; it is recomputed.
 
 Validity:
@@ -752,9 +789,15 @@ T_CAP                  = required_delay(3 × MAX_VOTE_BLOCKS)   (whitepaper §14
 A key party is *selectable* (§11.1) for a vote only if
 `delay_T ≥ required_delay(close_block − h_a)` where `h_a` is the height of
 the earliest valid anchor covering it, and `h_a < open_block`. A party that
-registers early simply needs a longer delay. Verifiers report, per declared
-party, whether this held (it is a secrecy label, not a counting condition:
-A38).
+registers early simply needs a longer delay. The rule is applied by the
+client when it chooses parties; it is a secrecy label, not a counting
+condition (A38), because a late-surfacing anchor would otherwise retroactively
+strand ballots that were correct when cast.
+
+*Not yet implemented:* the reference verifier reports a vote's outcome but no
+per-party secrecy label, so a ballot that named a party with an insufficient
+delay counts and reads no differently from one that did not. Until it does,
+nothing after the fact distinguishes the two.
 
 ### 10.5 Opening
 
@@ -764,6 +807,16 @@ A38).
   `m · G == h_j` (if not, that puzzle was dishonest — try another), then
   `sk = Σ_{i∈I∪{j}} λ_i^{I∪{j}} · share_i`, checks `sk · G == pk`, and
   publishes a `Share`. One honest unopened puzzle suffices.
+
+`T` is sized against `S_MAX_RSA`, the fastest hardware *anyone* could build,
+so a solver whose squaring rate is a factor `k` below that finishes roughly
+`k × 1.5` vote-lengths after the party registered. On general-purpose hardware
+`k` is two to three orders of magnitude, which puts a forced opening months to
+years past `close_block` (A54). Forcing is therefore a guarantee that a result
+*exists*, not a schedule on which it arrives: the operational path is
+voluntary publication after `close_block`, and a party that withholds delays
+the vote for as long as no solver with comparable hardware is running. Only
+parties some ballot declared are worth solving at all (§12; A53).
 
 ### 10.6 Deviations from the paper
 
@@ -793,8 +846,20 @@ At cast time the client takes every KeyParty item for the vote that is
 intrinsically valid, not excluded by the duplicate rule, anchored at height
 `h_a < open_block`, and satisfies §10.4; sorts their `keyparty_id`s; keeps at
 most `MAX_KEY_PARTIES` (the lexicographically smallest ids). This is
-`party_ids`. `PK = Σ pk_i` over them (`PK = identity` if none; the privacy
-indicator then reports "no key parties").
+`party_ids`. `PK = Σ pk_i` over them.
+
+Fewer than `vote.min_parties` survive that filter → **the client cannot cast**
+and must say so, rather than fall back to a smaller set: a ballot below the
+floor is invalid (§6.4), and at `min_parties = 0`, which only a public vote
+may set, `PK` would be the identity point and the ballot plaintext (A52).
+
+Selection is by lowest `keyparty_id`, which is `blake3` of the item's own
+bytes — a value the party chooses, since re-randomising one puzzle yields a
+fresh id for the cost of one modular exponentiation. A party can therefore
+grind its way into the selected set, and enough registrations grind their way
+into *all* of it. What that costs an attacker is one credential per party, so
+the security of this selection is exactly the Sybil resistance of the Issuers
+whose registries those parties prove membership in — no more (A55).
 
 ### 11.2 Encryption
 
@@ -905,6 +970,7 @@ fn derive_vote(snap, headers, init) -> Option<VoteDefinition>:
         registry_root: init.registry_root,
         open_block: open, close_block: close,
         min_ballots: MIN_BALLOTS, secrecy: init.secrecy,
+        min_parties: init.min_parties,
         origin: Initiative { initiative_id: init.id },
     }
 ```
@@ -924,8 +990,10 @@ between the deadline and `open_block` (144 blocks) like for any other vote.
 | `MAX_OPTIONS` | 64 | A12 |
 | `MAX_VOTE_BLOCKS` | 52 560 (≈ 1 year) | A12 |
 | `MAX_ITEM_BYTES` | 8 MiB | A12 |
-| `MAX_ANCHOR_LEAVES` | 1 000 000 | A12 |
+| `MAX_ANCHOR_LEAVES` | 200 000 | A12 |
 | `MAX_KEY_PARTIES` | 32 per ballot | A38 |
+| `MAX_AUTHORITY_KEYS` | 64 per registry snapshot | A57 |
+| `MAX_REGISTRY_BODY_BYTES` | 512 MiB per `POST /v1/registry` | A58 |
 | `VTC_N`, `VTC_T`, `VTC_OPEN` | 64, 33, 32 | §10.6 D6 |
 | `S_MAX_RSA` | 2^26 squarings/s | A13 |
 | `M` | 1.5 | whitepaper §14 |
@@ -996,23 +1064,23 @@ blake3("abc")                  = 6437b3ac38465133ffb63b75273a8db548c558465d79db0
 Inputs: question `"Should the bridge be built?"`, options `["Yes", "No"]`,
 issuer Ed25519 seed `0x11 × 32`, `registry_root = Fr(7)`,
 `open_block = 900000`, `close_block = 901008`, `min_ballots = 100`,
-`secrecy = 0x00`, authority Ed25519 seed `0x42 × 32`.
+`secrecy = 0x00`, `min_parties = 0`, authority Ed25519 seed `0x42 × 32`.
 
 ```
 issuer key    = d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737
 authority key = 2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12
-unsigned body (160 bytes) =
+unsigned body (164 bytes) =
   0101 1b000000 53686f756c642074686520627269646765206265206275696c743f
   02000000 03000000 596573 02000000 4e6f
   d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737
   0700000000000000000000000000000000000000000000000000000000000000
-  a0bb0d00 90bf0d00 64000000 00
+  a0bb0d00 90bf0d00 64000000 00 00000000
   00 2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12
-vote_id   = 70564b260d3247815cfd7111a8fc1e074d965d6d08b7a51cd9dce7360cca5b29
-signature = 94b5f892e8c5efdf1670c61b382b0d44c28b9be1098aaf3ff7d0abd4547c488d
-            babd55befc5a53d2321c8ed3b7156ef27765f6f7a2111b21b14dfbf6ba1f4f05
-item (224 bytes) = unsigned body || signature
-item_hash = f5ad47912036b409af3fe10d28d5c065fac78e27015740902d2ea305bdfaf1c3
+vote_id   = 8345ffe3c4e4cf3da3d9c55ff62075cf308ccb594548e6017d4c153baf1d5d5d
+signature = dca09c1b6e55cf53249edf159ae281b4d1db3e42e0937c7c33783403e3c2a476
+            925456db17431e50517695c72d961c031ce4fea9639a72eb8f7d9d8433829809
+item (228 bytes) = unsigned body || signature
+item_hash = 3681f7e14eb04660595b9564f33ef2f8a8e65c4497d14457639c7e4342aa39af
 ```
 
 Changing only `issuer_key` changes `vote_id`: the same question over another
@@ -1024,8 +1092,8 @@ Issuer's registry is another vote (§6.1).
 
 ```
 content preimage (71 bytes) =
-  0104 70564b26…0cca5b29 0500000000000000000000000000000000000000000000000000000000000000 01000000 01
-ballot_id = 2cb61f84daf5b8480e1a05f59fb14c5a09339d83682b28a363c8111c9d8d2ca7
+  0104 8345ffe3…af1d5d5d 0500000000000000000000000000000000000000000000000000000000000000 01000000 01
+ballot_id = ea120df82f78ada9ebda820abfbb31414f7fa246022bd9218d6c1ee39d223dfb
 ```
 
 ### 17.4 Anchor Merkle tree and Anchor item (Dev proof)

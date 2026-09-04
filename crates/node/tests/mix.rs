@@ -40,7 +40,7 @@ fn fixture() -> Fixture {
     let tree = RegistryTree::from_leaves(secrets.iter().map(commitment).collect());
     let authority = SigningKey::from_seed(&[0x42u8; 32]);
     let issuer = SigningKey::from_seed(&[0x11u8; 32]);
-    let snapshot = RegistrySnapshot::sign(&issuer, 1, &tree);
+    let snapshot = RegistrySnapshot::sign(&issuer, 1, &tree, vec![authority.public_key()]);
     let vote = sign_vote_definition(
         &authority,
         VoteDefinition {
@@ -52,6 +52,7 @@ fn fixture() -> Fixture {
             close_block: 200,
             min_ballots: 1,
             secrecy: Secrecy::None,
+            min_parties: 0,
             origin: Origin::Initiative {
                 initiative_id: [0; 32],
             },
@@ -60,7 +61,6 @@ fn fixture() -> Fixture {
     let chain = Arc::new(MockChain::new(100, 1.0));
     chain.set_tip(150);
     let deployment = Deployment {
-        authority_keys: vec![authority.public_key()],
         issuer_keys: vec![issuer.public_key()],
         dev_mode: true,
     };

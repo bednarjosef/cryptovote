@@ -53,6 +53,7 @@ fn sample_vote(r: &mut impl RngCore) -> VoteDefinition {
         close_block: 901_008,
         min_ballots: 100,
         secrecy: Secrecy::None,
+        min_parties: 0,
         origin: Origin::Authority {
             authority_key: rand32(r),
             signature: [0u8; 64],
@@ -76,6 +77,7 @@ fn all_items() -> Vec<Item> {
         Item::VoteDefinition(sample_vote(&mut r)),
         Item::VoteDefinition(VoteDefinition {
             secrecy: Secrecy::KeyParties,
+            min_parties: 1,
             origin: Origin::Initiative {
                 initiative_id: rand32(&mut r),
             },
@@ -88,6 +90,7 @@ fn all_items() -> Vec<Item> {
             threshold_n: 120_000,
             support_deadline_block: 905_000,
             secrecy: Secrecy::KeyParties,
+            min_parties: 1,
             author: rand_fr(&mut r),
             proof: rand_proof(&mut r),
         }),
@@ -318,8 +321,8 @@ fn rejects_unsorted_anchor_leaves_and_bad_counts() {
     let v = sample_vote(&mut rng());
     let mut bytes = Item::VoteDefinition(v.clone()).encode();
     let (_, content_len) = Item::VoteDefinition(v).encode_with_content_len();
-    // secrecy byte is 1 + 32 bytes before content end (origin tag + key)
-    bytes[content_len - 34] = 0x07;
+    // trailing content is secrecy(1) min_parties(4) origin tag(1) key(32)
+    bytes[content_len - 38] = 0x07;
     assert_eq!(Item::decode(&bytes), Err(DecodeError::Discriminant(0x07)));
 }
 
@@ -408,6 +411,7 @@ fn vector_vote() -> (VoteDefinition, SigningKey) {
         close_block: 901_008,
         min_ballots: 100,
         secrecy: Secrecy::None,
+        min_parties: 0,
         origin: Origin::Authority {
             authority_key: sk.public_key(),
             signature: [0u8; 64],
@@ -435,16 +439,16 @@ fn vector_17_2_vote_definition() {
     );
     let item = Item::VoteDefinition(v.clone());
     let (bytes, content_len) = item.encode_with_content_len();
-    assert_eq!(content_len, 160);
-    assert_eq!(bytes.len(), 224);
+    assert_eq!(content_len, 164);
+    assert_eq!(bytes.len(), 228);
     assert_eq!(
         hex(&bytes[..content_len]),
-        "01011b00000053686f756c642074686520627269646765206265206275696c743f0200000003000000596573020000004e6fd04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787370700000000000000000000000000000000000000000000000000000000000000a0bb0d0090bf0d006400000000002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        "01011b00000053686f756c642074686520627269646765206265206275696c743f0200000003000000596573020000004e6fd04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787370700000000000000000000000000000000000000000000000000000000000000a0bb0d0090bf0d00640000000000000000002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
     );
     let vote_id = v.vote_id();
     assert_eq!(
         hex(&vote_id),
-        "70564b260d3247815cfd7111a8fc1e074d965d6d08b7a51cd9dce7360cca5b29"
+        "8345ffe3c4e4cf3da3d9c55ff62075cf308ccb594548e6017d4c153baf1d5d5d"
     );
     let Origin::Authority {
         signature,
@@ -455,12 +459,12 @@ fn vector_17_2_vote_definition() {
     };
     assert_eq!(
         hex(signature),
-        "94b5f892e8c5efdf1670c61b382b0d44c28b9be1098aaf3ff7d0abd4547c488dbabd55befc5a53d2321c8ed3b7156ef27765f6f7a2111b21b14dfbf6ba1f4f05"
+        "dca09c1b6e55cf53249edf159ae281b4d1db3e42e0937c7c33783403e3c2a476925456db17431e50517695c72d961c031ce4fea9639a72eb8f7d9d8433829809"
     );
     assert!(verify(authority_key, Domain::Vote, &vote_id, signature));
     assert_eq!(
         hex(&item.item_hash()),
-        "f5ad47912036b409af3fe10d28d5c065fac78e27015740902d2ea305bdfaf1c3"
+        "3681f7e14eb04660595b9564f33ef2f8a8e65c4497d14457639c7e4342aa39af"
     );
     assert_eq!(Item::decode(&bytes).unwrap(), item);
 }
@@ -492,11 +496,11 @@ fn vector_17_3_ballot_content_id() {
     assert_eq!(n, 71);
     assert_eq!(
         hex(&bytes[..n]),
-        "010470564b260d3247815cfd7111a8fc1e074d965d6d08b7a51cd9dce7360cca5b2905000000000000000000000000000000000000000000000000000000000000000100000001"
+        "01048345ffe3c4e4cf3da3d9c55ff62075cf308ccb594548e6017d4c153baf1d5d5d05000000000000000000000000000000000000000000000000000000000000000100000001"
     );
     assert_eq!(
         hex(&b.content_id()),
-        "2cb61f84daf5b8480e1a05f59fb14c5a09339d83682b28a363c8111c9d8d2ca7"
+        "ea120df82f78ada9ebda820abfbb31414f7fa246022bd9218d6c1ee39d223dfb"
     );
 }
 

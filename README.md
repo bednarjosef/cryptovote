@@ -106,10 +106,10 @@ truth. Exit code 1 on mismatch.
 cargo run --release -p cv-issuer -- --dev --listen 127.0.0.1:8450 --key-seed 1111111111111111111111111111111111111111111111111111111111111111 --node http://127.0.0.1:8440
 
 # 2. A node with the dev anchorer. --issuer-key is repeatable and optional: it restricts which
-#    Issuers' registries this node stores. Omit it to carry any. The authority key is any Ed25519
-#    key you sign vote definitions with.
+#    Issuers' registries this node stores. Omit it to carry any. Nodes have no say in who may
+#    create votes: each Issuer names its own vote callers in the snapshot it signs (SPEC §4.3).
 cargo run --release -p cv-node -- --dev --listen 127.0.0.1:8440 --data-dir ./data/node1 \
-    --issuer-key <ISSUER_KEY_HEX> --authority-key <AUTHORITY_KEY_HEX> --anchor dev --anchor-interval 10
+    --issuer-key <ISSUER_KEY_HEX> --anchor dev --anchor-interval 10
 
 # 3. A participant.
 cargo run --release -p cv-client -- --dev --device alice.json init
@@ -125,13 +125,17 @@ cargo run --release -p cv-client -- --dev result --vote <VOTE_ID>
 # 4. Verify independently from a snapshot.
 curl -s http://127.0.0.1:8440/v1/snapshot > log.snap
 # --issuer-key is optional here too; without it the verifier reports every Issuer in the snapshot.
-cargo run --release -p cv-verifier -- --dev --snapshot log.snap --authority-key <AUTHORITY_KEY_HEX>
+cargo run --release -p cv-verifier -- --dev --snapshot log.snap
 ```
 
-Key parties: `ParticipantClient::register_keyparty` (before `open_block`)
-and `publish_share` (after close); nodes started with `--solver` force open
-any commitment whose share has not appeared. Vote definitions are created
-by signing with an authority key; there is no CLI for that yet (the simulation and tests use `cv_core::build::sign_vote_definition`).
+Key parties: `cv-client register-key-party --vote <ID> --delay-t <T>` (before
+`open_block`) and `cv-client publish-share --vote <ID> --keyparty <ID>` (after
+close); nodes started with `--solver` force open any commitment a ballot named
+whose share has not appeared. Add `--tor`: a registration is too large for the
+mix and goes direct, so Tor is what hides the address behind it (A56).
+Vote definitions are created by signing with a key the Issuer has named in its
+snapshot (`Issuer::set_authority_keys`); there is no CLI for that yet (the
+simulation and tests use `cv_core::build::sign_vote_definition`).
 Initiatives are created with `cv-client initiative` and supported with
 `cv-client support`; a node derives the vote automatically once the threshold
 of anchored supports is reached.
@@ -159,6 +163,16 @@ cargo run --release -p cv-client -- --dev --device alice.json register-node \
 paths needs five registered hops; with fewer, or with hops that share an
 operator, ASN or country, the client still sends and tells you what it got
 ("3 mix hop(s), 2 path(s), same country").
+
+## Dependency advisories
+
+```
+cargo install cargo-audit --locked
+cargo audit          # exit 0; see .cargo/audit.toml and DEPENDENCIES.md
+```
+
+One advisory is ignored, with the reachability argument recorded in
+`DEPENDENCIES.md`. Anything else that appears is new and unexamined.
 
 ## Release mode
 
@@ -190,7 +204,7 @@ Kotlin/Swift bindings with `uniffi-bindgen` against the built library, e.g.
 ## Where things are decided
 
 - `SPEC.md` — formats, tags, validity checklists, counting rule, key parties.
-- `ASSUMPTIONS.md` — every choice the whitepaper left open (A1–A48).
+- `ASSUMPTIONS.md` — every choice the whitepaper left open (A1–A59).
 - `BLOCKERS.md` — the §7 contradiction and its resolution.
 - `DEPENDENCIES.md` — why each crate, and what was rejected.
 - Trust boundaries are marked in code with `// TRUST: … (whitepaper §N)`.

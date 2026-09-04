@@ -21,7 +21,6 @@ use std::sync::Arc;
 struct Fixture {
     tree: RegistryTree,
     secrets: Vec<Fr>,
-    authority: SigningKey,
     issuer: SigningKey,
     snapshot: RegistrySnapshot,
     vote: VoteDefinition,
@@ -33,7 +32,7 @@ fn fixture() -> Fixture {
     let tree = RegistryTree::from_leaves(secrets.iter().map(commitment).collect());
     let authority = SigningKey::from_seed(&[0x42u8; 32]);
     let issuer = SigningKey::from_seed(&[0x11u8; 32]);
-    let snapshot = RegistrySnapshot::sign(&issuer, 1, &tree);
+    let snapshot = RegistrySnapshot::sign(&issuer, 1, &tree, vec![authority.public_key()]);
     let vote = sign_vote_definition(
         &authority,
         VoteDefinition {
@@ -45,6 +44,7 @@ fn fixture() -> Fixture {
             close_block: 200,
             min_ballots: 1,
             secrecy: Secrecy::None,
+            min_parties: 0,
             origin: Origin::Initiative {
                 initiative_id: [0; 32],
             },
@@ -55,7 +55,6 @@ fn fixture() -> Fixture {
     Fixture {
         tree,
         secrets,
-        authority,
         issuer,
         snapshot,
         vote,
@@ -65,7 +64,6 @@ fn fixture() -> Fixture {
 
 fn deployment(f: &Fixture) -> Deployment {
     Deployment {
-        authority_keys: vec![f.authority.public_key()],
         issuer_keys: vec![f.issuer.public_key()],
         dev_mode: true,
     }
@@ -123,7 +121,7 @@ fn insert_dedup_orphans_duplicates_prune() {
     let other_issuer = SigningKey::from_seed(&[9u8; 32]);
     assert!(matches!(
         log.add_registry(
-            RegistrySnapshot::sign(&other_issuer, 1, &f.tree),
+            RegistrySnapshot::sign(&other_issuer, 1, &f.tree, Vec::new()),
             f.tree.leaves().to_vec()
         ),
         Err(RegistryError::UnknownIssuer)

@@ -1,7 +1,7 @@
 //! Registry: sparse depth-32 Poseidon Merkle tree and the Issuer-signed
 //! snapshot (SPEC §4).
 
-use crate::constants::REGISTRY_DEPTH;
+use crate::constants::{MAX_AUTHORITY_KEYS, REGISTRY_DEPTH};
 use crate::encoding::{Reader, Writer};
 use crate::error::DecodeError;
 use cv_crypto::field::Fr;
@@ -136,27 +136,44 @@ pub struct RegistrySnapshot {
     pub leaf_count: u64,
     pub root: Fr,
     pub issuer_key: [u8; 32],
+    /// Keys the Issuer accepts as creators of top-down votes over this
+    /// electorate (SPEC §4.3, §6.1). Empty means none: only initiatives can
+    /// produce a vote. An Issuer that also calls its own votes lists itself.
+    pub authority_keys: Vec<[u8; 32]>,
     pub signature: [u8; 64],
 }
 
 impl RegistrySnapshot {
-    fn payload(epoch: u64, leaf_count: u64, root: &Fr) -> Vec<u8> {
+    fn payload(epoch: u64, leaf_count: u64, root: &Fr, authority_keys: &[[u8; 32]]) -> Vec<u8> {
         let mut w = Writer::new();
         w.u64(epoch);
         w.u64(leaf_count);
         w.fr(root);
+        w.list_len(authority_keys.len());
+        for k in authority_keys {
+            w.fixed(k);
+        }
         w.into_inner()
     }
 
-    pub fn sign(issuer: &SigningKey, epoch: u64, tree: &RegistryTree) -> Self {
+    pub fn sign(
+        issuer: &SigningKey,
+        epoch: u64,
+        tree: &RegistryTree,
+        authority_keys: Vec<[u8; 32]>,
+    ) -> Self {
         let root = tree.root();
         let leaf_count = tree.leaf_count();
-        let signature = issuer.sign(Domain::Registry, &Self::payload(epoch, leaf_count, &root));
+        let signature = issuer.sign(
+            Domain::Registry,
+            &Self::payload(epoch, leaf_count, &root, &authority_keys),
+        );
         RegistrySnapshot {
             epoch,
             leaf_count,
             root,
             issuer_key: issuer.public_key(),
+            authority_keys,
             signature,
         }
     }
@@ -170,7 +187,12 @@ impl RegistrySnapshot {
         verify(
             &self.issuer_key,
             Domain::Registry,
-            &Self::payload(self.epoch, self.leaf_count, &self.root),
+            &Self::payload(
+                self.epoch,
+                self.leaf_count,
+                &self.root,
+                &self.authority_keys,
+            ),
             &self.signature,
         )
     }
@@ -186,21 +208,46 @@ impl RegistrySnapshot {
         w.u64(self.leaf_count);
         w.fr(&self.root);
         w.fixed(&self.issuer_key);
+        w.list_len(self.authority_keys.len());
+        for k in &self.authority_keys {
+            w.fixed(k);
+        }
         w.fixed(&self.signature);
         w.into_inner()
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let (s, used) = Self::decode_prefix(bytes)?;
+        if used != bytes.len() {
+            return Err(DecodeError::Trailing);
+        }
+        Ok(s)
+    }
+
+    /// Decode a snapshot from the start of `bytes` and report how many it
+    /// used. The snapshot is variable-length now that it carries
+    /// `authority_keys`, so a caller with more data after it (the leaves file,
+    /// §4.3) cannot slice at a constant offset.
+    pub fn decode_prefix(bytes: &[u8]) -> Result<(Self, usize), DecodeError> {
         let mut r = Reader::new(bytes);
+        let epoch = r.u64()?;
+        let leaf_count = r.u64()?;
+        let root = r.fr()?;
+        let issuer_key = r.fixed()?;
+        let n = r.list_len(MAX_AUTHORITY_KEYS)?;
+        let mut authority_keys = Vec::with_capacity(n);
+        for _ in 0..n {
+            authority_keys.push(r.fixed()?);
+        }
         let s = RegistrySnapshot {
-            epoch: r.u64()?,
-            leaf_count: r.u64()?,
-            root: r.fr()?,
-            issuer_key: r.fixed()?,
+            epoch,
+            leaf_count,
+            root,
+            issuer_key,
+            authority_keys,
             signature: r.fixed()?,
         };
-        r.finish()?;
-        Ok(s)
+        Ok((s, r.position()))
     }
 }
 
