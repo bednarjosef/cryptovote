@@ -32,6 +32,10 @@ struct Args {
     /// proves your ballot is in the anchor's Merkle root.
     #[arg(long)]
     headers: Option<PathBuf>,
+    /// Route submissions over Tor. Failure to bootstrap is reported in the
+    /// privacy line, never silently ignored.
+    #[arg(long)]
+    tor: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -90,6 +94,12 @@ enum Command {
         deadline_block: u32,
         #[arg(long, default_value = "none")]
         secrecy: String,
+        /// Key parties every ballot in the derived vote must encrypt to.
+        /// Ignored (and forced to 0) under `--secrecy none`; under
+        /// `keyparties` a ballot declaring fewer is invalid, so set it no
+        /// higher than the number of parties you expect to volunteer.
+        #[arg(long, default_value_t = 1)]
+        min_parties: u32,
     },
     /// Publish a registration for a node you run, so other people's clients
     /// can pick it as a mix hop. Anyone enrolled with any Issuer can do this;
@@ -117,6 +127,31 @@ enum Command {
         #[arg(long)]
         issuer: Option<String>,
     },
+    /// Volunteer as a key party for a `secrecy: keyparties` vote, so that its
+    /// ballots cannot be read before the deadline unless you collude too.
+    /// Anyone eligible to vote in it may do this; the Issuer is not asked and
+    /// does not learn of it. One per person per vote.
+    ///
+    /// Register with `--tor`: the item proves membership in zero knowledge and
+    /// names nobody, but a plain submission still shows a node your address.
+    RegisterKeyParty {
+        #[arg(long)]
+        vote: String,
+        /// Sequential squarings before anyone can force your share open. Must
+        /// be at least `required_delay(close_block - anchor_height)` or clients
+        /// will not select you (relaxed under --dev).
+        #[arg(long)]
+        delay_t: u64,
+    },
+    /// Publish your key-party share after a vote closes, so the result can be
+    /// counted without anyone having to force your commitment open.
+    PublishShare {
+        #[arg(long)]
+        vote: String,
+        /// Your key party's content id, printed by `register-key-party`.
+        #[arg(long)]
+        keyparty: String,
+    },
     /// List initiatives.
     Initiatives,
     /// Support an initiative.
@@ -124,6 +159,37 @@ enum Command {
         #[arg(long)]
         initiative: String,
     },
+}
+
+/// A mix client honouring `--tor`. Bootstrap failure is carried in the
+/// returned client's `tor_error` and shows up in every `PrivacyLevel`, so a
+/// submission never silently loses the protection the user asked for.
+async fn mix_client(
+    node: &str,
+    dev: bool,
+    use_tor: bool,
+    pc: &ParticipantClient,
+) -> cv_client::mix::MixClient {
+    #[cfg(feature = "tor")]
+    let tor = if use_tor {
+        match cv_client::tor::TorTransport::bootstrap(Duration::from_secs(60)).await {
+            Ok(t) => cv_client::mix::TorSetup::Ready(t),
+            Err(e) => cv_client::mix::TorSetup::Failed(e.to_string()),
+        }
+    } else {
+        cv_client::mix::TorSetup::Disabled
+    };
+    #[cfg(not(feature = "tor"))]
+    let tor = if use_tor {
+        cv_client::mix::TorSetup::Failed("built without the tor feature".into())
+    } else {
+        cv_client::mix::TorSetup::Disabled
+    };
+    cv_client::mix::MixClient {
+        dev,
+        headers: pc.headers.clone(),
+        ..cv_client::mix::MixClient::new(NodeClient::new(node.to_string()), tor)
+    }
 }
 
 fn id(hex_str: &str) -> anyhow::Result<[u8; 32]> {
@@ -226,14 +292,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 // Through the mix, which retries on fresh paths until the
                 // anchor checks out (or the window runs out).
-                let mc = cv_client::mix::MixClient {
-                    dev: args.dev,
-                    headers: pc.headers.clone(),
-                    ..cv_client::mix::MixClient::new(
-                        NodeClient::new(args.node.clone()),
-                        cv_client::mix::TorSetup::Disabled,
-                    )
-                };
+                let mc = mix_client(&args.node, args.dev, args.tor, &pc).await;
                 let report = mc
                     .cast_with_retry(
                         &mut device,
@@ -303,16 +362,45 @@ async fn main() -> anyhow::Result<()> {
                 None => println!("unknown vote"),
             }
         }
+        Command::RegisterKeyParty { vote, delay_t } => {
+            let vid = id(&vote)?;
+            let mc = mix_client(&args.node, args.dev, args.tor, &pc).await;
+            let (kp, privacy) = pc
+                .register_keyparty(&mc, &mut device, &vid, delay_t)
+                .await?;
+            device.save(&args.device)?;
+            println!("key party {}", hex::encode(kp.content_id()));
+            println!("privacy:   {privacy}");
+            println!(
+                "Publish your share after close with:\n  \
+                 cv-client publish-share --vote {} --keyparty {}",
+                vote,
+                hex::encode(kp.content_id())
+            );
+        }
+        Command::PublishShare { vote, keyparty } => {
+            let vid = id(&vote)?;
+            let kpid = id(&keyparty)?;
+            let mc = mix_client(&args.node, args.dev, args.tor, &pc).await;
+            let privacy = pc.publish_share(&mc, &mut device, &vid, &kpid).await?;
+            device.save(&args.device)?;
+            println!("share published; privacy: {privacy}");
+        }
         Command::Initiative {
             text,
             issuer,
             deadline_block,
             secrecy,
+            min_parties,
         } => {
             let secrecy = match secrecy.as_str() {
                 "none" => Secrecy::None,
                 "keyparties" => Secrecy::KeyParties,
                 s => anyhow::bail!("unknown secrecy {s}"),
+            };
+            let min_parties = match secrecy {
+                Secrecy::None => 0,
+                Secrecy::KeyParties => min_parties,
             };
             let regs = pc.node.registries().await?;
             let latest = regs
@@ -324,7 +412,15 @@ async fn main() -> anyhow::Result<()> {
             let root =
                 fr_from_canonical(&id(&latest.root)?).ok_or_else(|| anyhow::anyhow!("bad root"))?;
             let (i, resp) = pc
-                .create_initiative(&device, &issuer_key, &root, text, deadline_block, secrecy)
+                .create_initiative(
+                    &device,
+                    &issuer_key,
+                    &root,
+                    text,
+                    deadline_block,
+                    secrecy,
+                    min_parties,
+                )
                 .await?;
             println!(
                 "initiative {} (issuer {}): {resp:?}",

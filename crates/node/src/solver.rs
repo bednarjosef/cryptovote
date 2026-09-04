@@ -1,6 +1,12 @@
-//! Solver role (whitepaper §10): force open every key party's timed
-//! commitment as soon as it appears, so results never depend on a party's
+//! Solver role (whitepaper §10): force open the timed commitment of every key
+//! party a ballot actually declared, so a result never depends on a party's
 //! cooperation. One sequential job per party; publishes a `Share`.
+//!
+//! Forcing open costs `T` sequential squarings, and `T` is sized against the
+//! fastest hardware anyone could build (`S_MAX_RSA`), not against this
+//! machine — so a solver without comparable hardware runs far past
+//! `close_block` (A54). Work here is therefore spent only on parties whose
+//! share a result is actually waiting for.
 
 use crate::Node;
 use cv_core::crypto::field::fr_to_bytes;
@@ -28,19 +34,38 @@ impl Default for SolverConfig {
     }
 }
 
-/// Key parties without a share, not counting duplicates under one nullifier.
+/// Key parties that some ballot actually needs and whose share is missing.
+///
+/// Only *declared* parties are ever needed: the counting rule sums the shares
+/// of `∪ b.party_ids` over the counted ballots (SPEC §12), so a party nobody
+/// encrypted to is never on the path to a result. Solving those too would let
+/// anyone register key parties in bulk and bill the network one `T`-length
+/// sequential job apiece — the liveness attack of A37, but unbounded, since
+/// registration would not have to survive client selection to cost anything
+/// (A53). Forcing open is expensive enough (§10.4, A54) that it is spent only
+/// where a result depends on it.
 pub fn missing_shares(node: &Node) -> Vec<KeyParty> {
     let log = node.log.lock().unwrap();
     let all: Vec<KeyParty> = log.all_keyparties().into_iter().cloned().collect();
     let mut out = Vec::new();
     for vote_id in all.iter().map(|k| k.vote_id).collect::<HashSet<_>>() {
+        let declared: HashSet<Id> = log
+            .ballots_of(&vote_id)
+            .into_iter()
+            .filter_map(|b| KeyPartiesPayload::decode(&b.payload).ok())
+            .flat_map(|p| p.party_ids)
+            .collect();
+        if declared.is_empty() {
+            continue;
+        }
         let of_vote: Vec<KeyParty> = all
             .iter()
             .filter(|k| k.vote_id == vote_id)
             .cloned()
             .collect();
         for kp in unique_by_nullifier(&of_vote, |k| fr_to_bytes(&k.nullifier), |k| k.content_id()) {
-            if log.shares_of(&kp.content_id()).is_empty() {
+            let id = kp.content_id();
+            if declared.contains(&id) && log.shares_of(&id).is_empty() {
                 out.push(kp);
             }
         }

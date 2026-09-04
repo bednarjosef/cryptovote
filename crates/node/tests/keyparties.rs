@@ -54,10 +54,11 @@ async fn keyparties_vote_end_to_end() {
     )));
     let mut issuer = Issuer::dev([0x11u8; 32]);
     let authority = SigningKey::from_seed(&[0x42u8; 32]);
+    // This electorate accepts votes called by `authority` (SPEC §4.3, A57).
+    issuer.set_authority_keys(vec![authority.public_key()]);
     let chain = Arc::new(MockChain::new(50, 1.0));
     chain.set_tip(90); // before open_block: key parties register now
     let deployment = Deployment {
-        authority_keys: vec![authority.public_key()],
         issuer_keys: vec![issuer.public_key()],
         dev_mode: true,
     };
@@ -113,6 +114,7 @@ async fn keyparties_vote_end_to_end() {
             close_block: 200,
             min_ballots: 1,
             secrecy: Secrecy::KeyParties,
+            min_parties: 1,
             origin: Origin::Initiative {
                 initiative_id: [0; 32],
             },
@@ -124,18 +126,26 @@ async fn keyparties_vote_end_to_end() {
         .await
         .unwrap();
 
+    // A mix client with no registered hops: `send_item` falls back to direct
+    // submission for both item sizes, which is what this test wants. The
+    // Tor/mix routing itself is covered in the mix tests.
+    let mix = cv_client::mix::MixClient::new(
+        NodeClient::new(client.base_url().to_string()),
+        cv_client::mix::TorSetup::Disabled,
+    );
+
     // Two key parties register (2048-bit moduli, tiny dev delay) and get anchored before open.
     let t0 = Instant::now();
     let (kp1, r1) = pc
-        .register_keyparty(&mut devices[0], &vid, DEV_DELAY)
+        .register_keyparty(&mix, &mut devices[0], &vid, DEV_DELAY)
         .await
         .unwrap();
     let (kp2, r2) = pc
-        .register_keyparty(&mut devices[1], &vid, DEV_DELAY)
+        .register_keyparty(&mix, &mut devices[1], &vid, DEV_DELAY)
         .await
         .unwrap();
     eprintln!("two key-party registrations took {:.1?}", t0.elapsed());
-    assert!(matches!(r1, SubmitResponse::New { .. }) && matches!(r2, SubmitResponse::New { .. }));
+    assert_eq!((r1.hops, r2.hops), (0, 0), "no hops registered: direct");
     // A tampered registration is rejected.
     let mut bad = kp2.clone();
     bad.h[255] ^= 1;
@@ -190,12 +200,9 @@ async fn keyparties_vote_end_to_end() {
     assert_eq!(r.outcome, "pending");
     assert_eq!(r.missing_shares.len(), 2);
     // Party 1 publishes voluntarily.
-    assert!(matches!(
-        pc.publish_share(&devices[0], &vid, &kp1.content_id())
-            .await
-            .unwrap(),
-        SubmitResponse::New { .. }
-    ));
+    pc.publish_share(&mix, &mut devices[0], &vid, &kp1.content_id())
+        .await
+        .unwrap();
     // A wrong share is rejected.
     let wrong = Share {
         vote_id: vid,
@@ -238,7 +245,6 @@ async fn keyparties_vote_end_to_end() {
         Arc::new(cv_verifier::MockHeaders { tip: 250 }),
         cv_verifier::Config {
             deployment: Deployment {
-                authority_keys: vec![authority.public_key()],
                 issuer_keys: vec![issuer.public_key()],
                 dev_mode: true,
             },

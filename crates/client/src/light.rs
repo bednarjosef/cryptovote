@@ -2,6 +2,7 @@
 //! anything that matters (whitepaper §12): anchors are verified by SPV and
 //! items by their proofs on the client side.
 
+use cv_core::constants::REGISTRY_DEPTH;
 use cv_core::crypto::field::{Fr, fr_to_bytes};
 use cv_core::items::*;
 use cv_core::registry::{RegistrySnapshot, decode_leaves, encode_leaves};
@@ -300,6 +301,61 @@ impl NodeClient {
             return Err(ClientError::BadRegistry("leaf count"));
         }
         Ok(Some((snapshot, leaves)))
+    }
+
+    /// Just the signed snapshot: the root, `leaf_count` and `authority_keys`,
+    /// without the leaves file behind it (A58).
+    pub async fn registry_snapshot(
+        &self,
+        issuer_key: &[u8; 32],
+        root: &Fr,
+    ) -> Result<Option<RegistrySnapshot>, ClientError> {
+        let path = format!(
+            "/v1/registry/{}/{}/snapshot",
+            hex::encode(issuer_key),
+            hex::encode(fr_to_bytes(root)),
+        );
+        let Some(bytes) = self.get_bytes(path).await? else {
+            return Ok(None);
+        };
+        let snapshot =
+            RegistrySnapshot::decode(&bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+        if !snapshot.verify_by(issuer_key) || snapshot.root != *root {
+            return Err(ClientError::Malformed(
+                "snapshot is not this Issuer's, or not this root".into(),
+            ));
+        }
+        Ok(Some(snapshot))
+    }
+
+    /// One person's Merkle path under a signed root, instead of the whole
+    /// leaves file (A58). Returns `(index, siblings)`; the caller must check
+    /// the path against the root it came from — `ParticipantClient::participant`
+    /// does.
+    pub async fn registry_path(
+        &self,
+        issuer_key: &[u8; 32],
+        root: &Fr,
+        commitment: &Fr,
+    ) -> Result<Option<(u32, [Fr; REGISTRY_DEPTH])>, ClientError> {
+        let path = format!(
+            "/v1/registry/{}/{}/path/{}",
+            hex::encode(issuer_key),
+            hex::encode(fr_to_bytes(root)),
+            hex::encode(fr_to_bytes(commitment)),
+        );
+        let Some(bytes) = self.get_bytes(path).await? else {
+            return Ok(None);
+        };
+        let mut r = cv_core::encoding::Reader::new(&bytes);
+        let index = r.u32().map_err(|e| ClientError::Malformed(e.to_string()))?;
+        let mut siblings = [Fr::from(0u64); REGISTRY_DEPTH];
+        for sib in siblings.iter_mut() {
+            *sib = r.fr().map_err(|e| ClientError::Malformed(e.to_string()))?;
+        }
+        r.finish()
+            .map_err(|e| ClientError::Malformed(e.to_string()))?;
+        Ok(Some((index, siblings)))
     }
 
     pub async fn post_registry(

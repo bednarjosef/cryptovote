@@ -100,6 +100,7 @@ pub fn build_initiative(
     threshold_n: u32,
     support_deadline_block: u32,
     secrecy: Secrecy,
+    min_parties: u32,
 ) -> Result<Initiative, Unsatisfiable> {
     // Scoped to the Issuer: a pseudonym inside one electorate, and nothing
     // that links the same person's initiatives across electorates (A50).
@@ -115,6 +116,7 @@ pub fn build_initiative(
         threshold_n,
         support_deadline_block,
         secrecy,
+        min_parties,
         author,
         proof: ZERO_PROOF,
     };

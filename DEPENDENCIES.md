@@ -83,3 +83,18 @@ No `nargo`/`circom` toolchain is needed: the circuit is written as arkworks
 R1CS (whitepaper §15 lists Noir/Circom as examples; Groth16 over an R1CS
 description is the same class of construction and keeps the build inside
 `cargo`).
+
+## Advisories
+
+`cargo audit` runs clean (exit 0) against `.cargo/audit.toml`, which ignores exactly one
+advisory. Every entry there needs a reachability argument, recorded here:
+
+| Advisory | Crate | Why it is ignored |
+|---|---|---|
+| RUSTSEC-2023-0071 (medium) | `rsa` 0.9.10 | Marvin attack: RSA key recovery through a decryption timing sidechannel. Reached only via `arti-client → tor-keymgr → tor-key-forge → ssh-key-fork-arti`. No CryptoVote code uses the `rsa` crate — the timed commitments do their own arithmetic with `num-bigint-dig`, and the protocol holds no RSA private key that an attacker could submit ciphertexts to and time. No fixed version exists upstream. Revisit when arti drops it or `rsa` ships a fix. |
+
+Three crates are flagged unmaintained and none is a direct dependency:
+`bincode` 2.0.1 (RUSTSEC-2025-0141), `derivative` 2.2.0 (RUSTSEC-2024-0388)
+and `paste` 1.0.15 (RUSTSEC-2024-0436). They carry no known vulnerability;
+they are listed so that a future advisory against one is recognised as
+already-known ground rather than a surprise.

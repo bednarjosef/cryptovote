@@ -584,3 +584,194 @@ checked against Bitcoin rather than believed.
 Left alone deliberately: `whitepaper.md` still describes the fallback in its
 item table (§6), §9 and the §14 constants table. That document is the source
 of truth for the design and is the author's to change.
+
+## A secrecy floor, and honest claims about what forcing costs  (2026-09-04)
+
+Three corrections to `secrecy = keyparties`, none of which change what the
+mode is for. Two are holes; the third is documentation that had drifted ahead
+of what the code can deliver.
+
+**`min_parties`: the Issuer's setting binds the voter.** A ballot chose its
+own party set, and nothing stopped it choosing the empty one — whose aggregate
+key is the identity point, so `c2 = option · G` and anyone reads the ballot at
+cast time by the same table lookup the tally uses. A public ballot inside a
+secret vote, which is G4 straight through, and not a coercion question (the
+whitepaper already puts coercion out of scope, §16.1). `VoteDefinition` and
+`Initiative` now carry `min_parties(u32)`, `0` under `none` and
+`1..=MAX_KEY_PARTIES` under `keyparties`; a ballot declaring fewer is invalid.
+
+The check reads only the ballot's own bytes. Comparing against the parties
+actually available would have been stronger and was rejected: that number
+depends on which anchors have surfaced, so a late anchor would retroactively
+invalidate ballots that were correct when cast — exactly the stranding A38
+exists to prevent. What survives is that a coerced voter may still choose
+*which* parties to name. What it costs is castability: a vote whose volunteers
+never reach `min_parties` cannot be voted in, and clients say so
+(`ParticipantError::TooFewKeyParties`) rather than quietly dropping to a
+smaller set. A52.
+
+**The solver only forces parties a ballot named.** `missing_shares` walked
+every registration. The counting rule needs `∪ b.party_ids` and nothing else,
+so the rest was work spent off the path to a result — and worse, an
+unbounded invitation: register key parties in bulk and each one bills the
+network a `T`-length sequential job, without ever having to survive client
+selection. A53.
+
+**Forced opening is a guarantee of existence, not of timeliness.** Measured,
+not estimated: the reference solver runs at 1.95 × 10⁵ squarings/s against an
+assumed `S_MAX_RSA = 2^26`, a factor of 345. An 8-day vote's `required_delay`
+of 6.96 × 10¹³ squarings is 12 days at `S_MAX_RSA` and about 11 years here; a
+tuned Montgomery implementation buys back perhaps one order of magnitude of
+the three. So whitepaper §10's "liveness never depends on key parties" is true
+only in the limit — in operation a vote gets its result because parties
+publish voluntarily at close, and one that vanishes stalls the vote until
+somebody with purpose-built hardware finishes. Lowering `S_MAX_RSA` is not a
+fix; it lowers the bar for an adversary with real hardware to read the running
+count early, which is the attack the delay exists to prevent. A54.
+
+Also recorded rather than fixed, because no selection rule fixes it (A55):
+key-party selection inherits the Sybil resistance of the Issuers involved, and
+an Issuer is any Ed25519 key that signs a root. Clients take the lowest
+`keyparty_id`s, and that id is `blake3` of bytes the party controls, so a
+party can grind into the selected set for one modular exponentiation per
+attempt. Ordering by an unpredictable beacon would stop the grinding — but an
+actor holding most of the pool still captures every slot, because unbiasable
+selection and Sybil resistance are different problems and a selection rule
+only solves the first. Key-party secrecy holds against anyone who cannot mint
+credentials wholesale under a registry that people accept, and no further.
+
+- `VoteDefinition` / `Initiative` gain `min_parties(u32)` after `secrecy`;
+  `derive_vote` copies it; `VoteSummary` and the node's vote endpoint expose
+  it; `cv-client initiative` gains `--min-parties`.
+- SPEC §6.1, §6.2, §6.4, §10.4, §10.5, §11.1, §13, §17.2 and §17.3 (both
+  vectors regenerated — `min_parties` is inside `vote_id`, so the body is 164
+  bytes and both ids move).
+- `whitepaper.md` §1 G4, §2 trust table, §3, §6, §8, §10, §13 adversary table,
+  §14 defaults, §16 limitations 6 and 7. Phase 12 left the whitepaper alone as
+  the author's document; these edits were asked for directly.
+- SPEC §10.4 now marks the per-party secrecy label as not implemented: the
+  verifier reports an outcome and no label, so a ballot that named a party
+  with an insufficient delay is indistinguishable after the fact from one that
+  did not. Still open.
+- Tests: `vote_definition_validity` covers the `min_parties`/secrecy pairing
+  at both bounds; `a_secret_ballot_cannot_declare_too_few_key_parties` builds
+  a `min_parties = 2` vote with two real key parties and shows the zero-party
+  ballot is rejected *and* plaintext-equivalent, the one-party ballot is
+  rejected, and the two-party ballot is valid and unreadable without shares.
+
+## The Issuer names who may call its votes  (2026-09-04)
+
+`AUTHORITY_KEYS` was a deployment constant, and two things were wrong with
+that. Nothing tied an authority to an Issuer, so any key a deployment
+recognised could call a vote over *any* electorate — whose Issuer neither
+consented nor was told. And it was compiled into nodes and verifiers: becoming
+an Issuer needed no permission at all, but becoming a vote caller meant
+shipping software to the whole network, in a protocol that has no other
+centralisation point.
+
+The list moves into the Registry snapshot, inside the signed payload, so it is
+the Issuer's statement about its own electorate and revoking a caller is an
+ordinary re-publish at the next epoch. A state that both defines the electorate
+and calls its votes lists its own key, and the two roles collapse into one
+without the protocol assuming they always do; a deployment with an electoral
+commission genuinely independent of the population register lists the
+commission, and then the separation is checkable rather than conventional.
+**Empty means initiatives only**, and it is the default for a new Issuer, so
+calling votes over other people's electorates is not something one forgets to
+turn off. A57.
+
+This removes a way for unrelated parties to interfere and removes a
+centralisation point. It does not remove a trust assumption: an Authority is
+still trusted for creating votes, the Issuer naming it is still trusted for the
+electorate, and a government holding both keys has exactly the powers it had.
+
+- `RegistrySnapshot` gains `authority_keys(list<[32]>)`, ≤ `MAX_AUTHORITY_KEYS`
+  (64), covered by the Ed25519 registry signature (SPEC §1.6 message changed).
+  `Issuer` carries and persists it; `set_authority_keys` advances the epoch, so
+  a removed key cannot create votes against later snapshots.
+- `Deployment::authority_keys` deleted, with the `--authority-key` flags on
+  `cv-node` and `cv-verifier` and the field in the wasm verifier config.
+  `RegistryInfo` carries the list instead and is no longer `Copy`.
+- Two latent bugs, both the same mistake — a fixed-size record became
+  variable-length and callers still assumed a constant:
+  - `POST /v1/registry` sliced the body at 144 bytes to split snapshot from
+    leaves file, so every registry submission 400'd. Added
+    `RegistrySnapshot::decode_prefix`, which reports where the snapshot ends.
+  - The §15 verifier snapshot format capped each registry blob at 1024 bytes;
+    a full authority list is 2196. Added `MAX_REGISTRY_SNAPSHOT_BYTES`
+    (`148 + 32 · MAX_AUTHORITY_KEYS`). No test reached this — every fixture
+    used one authority — so it would have surfaced only on a registry naming
+    more than about 27.
+- SPEC §1.6, §4.3, §6.1, §14; whitepaper §7; README (both run commands, and
+  the key-party CLI which was still documented as library-only); A57.
+- Tests: an authority the electorate never named is refused; a registry naming
+  nobody refuses a well-formed Authority vote; and a maximum-size snapshot
+  round-trips through the wire (with a leaves file appended) and the §15
+  format, with a tampered authority list breaking the signature — proving the
+  list is inside the signed payload rather than beside it.
+
+The `Issuer::dev` fixtures in the key-party and lifecycle tests now name their
+authority explicitly. Both failed first without it, which is the rule working.
+
+## Production-readiness audit: the transport could not carry the protocol  (2026-09-04)
+
+Three findings, all in the same place — the HTTP layer quietly imposing limits
+the protocol never agreed to — plus what an audit could not fix.
+
+**A registry above roughly 65 000 people could not be published.** Measured
+against a stub of the real handler: 65 000 leaves accepted, 100 000 refused
+with 413. Axum's default request body limit is 2 MiB, and nothing overrode it,
+so `MAX_ITEM_BYTES` (8 MiB) was decorative and a national electorate was
+impossible to enrol. Both routes now declare limits taken from the protocol's
+own constants, with `MAX_REGISTRY_BODY_BYTES` (512 MiB) for registry uploads.
+
+**Every ballot cast downloaded the whole electorate.** The client fetched the
+full leaves file to build a 32-sibling Merkle path — 32 bytes per registered
+person, 320 MB for ten million, from a phone, on every cast. Three paths did
+it: `ParticipantClient::participant`, `MixClient::cast_with_retry` (the one
+`cv-client vote` actually uses), and `create_initiative`, which pulled the
+whole file to read the `leaf_count` already in the signed snapshot. All three
+now go through one `participant_via_path`. Nodes now serve
+`GET /v1/registry/{issuer}/{root}/path/{commitment}`: `index || siblings`,
+1 028 bytes whatever the electorate's size. Nothing is given up. The check was
+that the served leaves rebuild the signed root; it is now that the served path
+rebuilds it, through the `root_from_path` that already existed. A node lying
+about the index or a sibling is caught in the same place for the same reason —
+the hostile-node test now has the liar serve a path out of its own tree, and
+still catches it. Measured end to end on a live node: a 100 000-person
+registry that returned 413 before now publishes, and a voter downloads 1 028
+bytes against 3.2 MB of leaves — 3 113× less, and the ratio grows with the
+electorate because the path is 32 siblings whatever the size. A58.
+
+**`MAX_ANCHOR_LEAVES` described anchors that cannot exist.** One million leaves
+is 30 MiB inside an item capped at 8 MiB, so the real ceiling was 262 144 and
+the constant said nothing true. Now 200 000. Several anchors per block were
+always fine — §12 takes the earliest height covering an item, whoever published
+it — so the smaller figure costs nothing. A59.
+
+Timeouts and rate limiting were deliberately left out of the node: they belong
+to a reverse proxy, and building half of them in-process would suggest a node
+is safe to expose directly.
+
+**What the audit could not fix, in the order it matters:**
+
+1. **There is no Groth16 ceremony.** Release mode demands `--keys-dir` with
+   ceremony keys and nothing in this repository can produce them; A24 records
+   the ceremony as out of scope. The only available path is `setup(rng)` run by
+   one party, who then holds the toxic waste and can forge membership proofs —
+   that is, cast ballots as anyone, undetectably. This is the largest single
+   gap between the current state and a deployment, and it needs either an MPC
+   implementation here or documented interop with an existing one.
+2. **`cv-vtc` is unaudited**, as whitepaper §15 says it must be before binding
+   use. It is the only component implemented from a paper rather than taken
+   from a maintained library. Moot if key parties are replaced (§17).
+3. **A poisoned Log mutex serves errors forever.** Every handler does
+   `log.lock().unwrap()`; one panic while holding it and every later request
+   panics, with the process still alive so a supervisor sees nothing wrong.
+   Recovering the guard trades that for possibly-inconsistent in-memory
+   indexes, so the right answer depends on how nodes are supervised — left as
+   a decision rather than guessed at.
+4. **No CLI creates votes**; they are signed through the library.
+5. **The per-party secrecy label** promised by SPEC §10.4 is still unimplemented
+   in the verifier, so a ballot that named an under-delayed key party is
+   indistinguishable afterwards from one that did not.

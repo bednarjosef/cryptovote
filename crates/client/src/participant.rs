@@ -30,12 +30,54 @@ pub enum ParticipantError {
     ForgedLeaves,
     #[error("the node listed a key party it cannot back with a matching item")]
     ForgedKeyParty,
+    #[error(
+        "this vote requires {required} key parties and only {available} are selectable; \
+         a ballot below the floor would be invalid, so it cannot be cast yet"
+    )]
+    TooFewKeyParties { required: u32, available: usize },
     #[error("cannot prove membership: {0}")]
     Prove(#[from] cv_core::crypto::groth16::Unsatisfiable),
     #[error("node rejected the item: {0}")]
     Rejected(String),
     #[error("issuer error: {0}")]
     Issuer(String),
+    #[error("could not send through the mix: {0}")]
+    Mix(String),
+}
+
+/// Build a [`Participant`] from this device's Merkle path under a signed root.
+///
+/// The node serves one path, not the electorate: at national scale the leaves
+/// file is hundreds of megabytes and every cast would pay for it (A58). The
+/// path is checked against the root the caller already trusts, so a node that
+/// lies about the index or any sibling is caught exactly as a forged leaves
+/// file was — the recomputed root does not match.
+pub async fn participant_via_path(
+    node: &NodeClient,
+    device: &Device,
+    issuer_key: &[u8; 32],
+    root: &Fr,
+) -> Result<Participant, ParticipantError> {
+    let commitment = device.commitment();
+    let (index, siblings) = node
+        .registry_path(issuer_key, root, &commitment)
+        .await?
+        .ok_or_else(|| {
+            ParticipantError::NotEnrolled(
+                hex::encode(issuer_key),
+                hex::encode(cv_core::crypto::field::fr_to_bytes(root)),
+            )
+        })?;
+    if cv_core::registry::root_from_path(commitment, index, &siblings) != *root {
+        return Err(ParticipantError::ForgedLeaves);
+    }
+    Ok(Participant {
+        secret: device.secret,
+        issuer_key: *issuer_key,
+        registry_root: *root,
+        index,
+        siblings,
+    })
 }
 
 pub struct ParticipantClient {
@@ -99,24 +141,7 @@ impl ParticipantClient {
         issuer_key: &[u8; 32],
         root: &Fr,
     ) -> Result<Participant, ParticipantError> {
-        let (_, leaves) = self
-            .node
-            .registry(issuer_key, root)
-            .await?
-            .ok_or(ParticipantError::NoRegistry)?;
-        let p = device.participant(issuer_key, &leaves).ok_or_else(|| {
-            ParticipantError::NotEnrolled(
-                hex::encode(issuer_key),
-                hex::encode(cv_core::crypto::field::fr_to_bytes(root)),
-            )
-        })?;
-        // `NodeClient::registry` checked the Issuer's signature over the root;
-        // this checks that the leaves it served are the ones under that root,
-        // so a node cannot make the device prove against a tree of its own.
-        if p.registry_root != *root {
-            return Err(ParticipantError::ForgedLeaves);
-        }
-        Ok(p)
+        participant_via_path(&self.node, device, issuer_key, root).await
     }
 
     fn check(resp: SubmitResponse) -> Result<SubmitResponse, ParticipantError> {
@@ -248,6 +273,7 @@ impl ParticipantClient {
         Ok((reg, resp))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_initiative(
         &self,
         device: &Device,
@@ -256,15 +282,26 @@ impl ParticipantClient {
         text: String,
         support_deadline_block: u32,
         secrecy: Secrecy,
+        min_parties: u32,
     ) -> Result<(Initiative, SubmitResponse), ParticipantError> {
-        let (snapshot, _) = self
+        // `leaf_count` is in the snapshot; the leaves file is not needed to
+        // compute a threshold over it (A58).
+        let snapshot = self
             .node
-            .registry(issuer_key, root)
+            .registry_snapshot(issuer_key, root)
             .await?
             .ok_or(ParticipantError::NoRegistry)?;
         let p = self.participant(device, issuer_key, root).await?;
         let n = initiative_threshold(snapshot.leaf_count);
-        let i = build_initiative(&self.keys, &p, text, n, support_deadline_block, secrecy)?;
+        let i = build_initiative(
+            &self.keys,
+            &p,
+            text,
+            n,
+            support_deadline_block,
+            secrecy,
+            min_parties,
+        )?;
         let resp = Self::check(self.node.submit_item(&Item::Initiative(i.clone())).await?)?;
         Ok((i, resp))
     }
@@ -376,6 +413,16 @@ pub async fn prepare_ballot(
         Secrecy::None => plaintext_ballot(keys, p, vd, option)?,
         Secrecy::KeyParties => {
             let parties = select_parties(node, vd, dev).await?;
+            // The Issuer's floor is a validity rule (SPEC §6.4), so casting
+            // below it produces an item the network will reject. Falling back
+            // to a smaller set would be worse than failing: at zero parties
+            // the ciphertext is the option index in the clear (A52).
+            if (parties.len() as u32) < vd.min_parties {
+                return Err(ParticipantError::TooFewKeyParties {
+                    required: vd.min_parties,
+                    available: parties.len(),
+                });
+            }
             keyparties_ballot(keys, p, vd, &parties, option)?
         }
     })
@@ -384,12 +431,23 @@ pub async fn prepare_ballot(
 impl ParticipantClient {
     /// Register as a key party for a vote (SPEC §6.6); the secret share is
     /// kept on the device until `publish_share`.
+    /// Sent through `mix`, which routes by size: a registration is ~32 KB and
+    /// does not fit a Sphinx payload (`MAX_MESSAGE_LEN`), so it goes direct —
+    /// over Tor when the transport has it. The returned `PrivacyLevel` says
+    /// which protection was actually achieved; it reports `NO Tor` rather than
+    /// failing, so a caller who needs anonymity must check it.
+    ///
+    /// The item itself is already anonymous — a ZK membership proof and a
+    /// nullifier scoped by tag and `vote_id`, unlinkable to the same person's
+    /// ballot and across votes (A50). What leaks without this is the network
+    /// layer: the address that submitted it (A56).
     pub async fn register_keyparty(
         &self,
+        mix: &crate::mix::MixClient,
         device: &mut Device,
         vote_id: &Id,
         delay_t: u64,
-    ) -> Result<(KeyParty, SubmitResponse), ParticipantError> {
+    ) -> Result<(KeyParty, crate::mix::PrivacyLevel), ParticipantError> {
         let vd = self
             .node
             .vote(vote_id)
@@ -399,20 +457,32 @@ impl ParticipantClient {
             .participant(device, &vd.issuer_key, &vd.registry_root)
             .await?;
         let (kp, sk) = build_keyparty(&self.keys, &p, vote_id, delay_t, &mut rand::rngs::OsRng)?;
-        let resp = Self::check(self.node.submit_item(&Item::KeyParty(kp.clone())).await?)?;
+        // Keep the secret before announcing: a registration on the Log whose
+        // share this device cannot produce would stall the vote until a solver
+        // forces it open (A54).
         device
             .keyparty_secrets
             .insert(hex::encode(vote_id), hex::encode(sk));
-        Ok((kp, resp))
+        let (privacy, _) = mix
+            .send_item(device, Item::KeyParty(kp.clone()).encode(), &[])
+            .await
+            .map_err(|e| ParticipantError::Mix(e.to_string()))?;
+        Ok((kp, privacy))
     }
 
     /// Publish this device's share for a vote (after close, SPEC §10.5).
+    /// A `Share` is 97 bytes, so unlike the registration it fits a Sphinx
+    /// payload and goes through the mix, hidden among ballot traffic. It is
+    /// the second observable act by one key party, so sending it the same way
+    /// as the first would give an observer two chances at the same address
+    /// (A56).
     pub async fn publish_share(
         &self,
-        device: &Device,
+        mix: &crate::mix::MixClient,
+        device: &mut Device,
         vote_id: &Id,
         keyparty_id: &Id,
-    ) -> Result<SubmitResponse, ParticipantError> {
+    ) -> Result<crate::mix::PrivacyLevel, ParticipantError> {
         let sk_hex = device.keyparty_secrets.get(&hex::encode(vote_id)).ok_or(
             ParticipantError::Rejected("no key-party secret for this vote".into()),
         )?;
@@ -420,14 +490,16 @@ impl ParticipantClient {
             .ok()
             .and_then(|v| v.try_into().ok())
             .ok_or(ParticipantError::Rejected("bad stored secret".into()))?;
-        Self::check(
-            self.node
-                .submit_item(&Item::Share(Share {
-                    vote_id: *vote_id,
-                    keyparty_id: *keyparty_id,
-                    sk,
-                }))
-                .await?,
-        )
+        let bytes = Item::Share(Share {
+            vote_id: *vote_id,
+            keyparty_id: *keyparty_id,
+            sk,
+        })
+        .encode();
+        let (privacy, _) = mix
+            .send_item(device, bytes, &[])
+            .await
+            .map_err(|e| ParticipantError::Mix(e.to_string()))?;
+        Ok(privacy)
     }
 }

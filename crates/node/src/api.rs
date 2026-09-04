@@ -34,14 +34,33 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/votes/{id}/nullifier/{n}", get(nullifier_status))
         .route("/v1/anchors", get(anchors))
         .route("/v1/anchors/{id}/proof/{cid}", get(anchor_proof))
-        .route("/v1/registry", get(registries).post(post_registry))
+        .route(
+            "/v1/registry",
+            get(registries)
+                .post(post_registry)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    cv_core::constants::MAX_REGISTRY_BODY_BYTES,
+                )),
+        )
         .route(
             "/v1/registry/{issuer}/{root}/snapshot",
             get(registry_snapshot),
         )
         .route("/v1/registry/{issuer}/{root}/leaves", get(registry_leaves))
+        .route(
+            "/v1/registry/{issuer}/{root}/path/{commitment}",
+            get(registry_path),
+        )
         .route("/v1/headers/tip", get(tip))
         .route("/v1/snapshot", get(snapshot))
+        // Axum's default body limit is 2 MiB, well under `MAX_ITEM_BYTES`, so
+        // without this the HTTP layer silently contradicts the protocol and
+        // rejects items the validity rules accept (A59). Registry uploads set
+        // their own, larger limit above. Request timeouts and rate limiting are
+        // a reverse proxy's job and are not attempted here.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            cv_core::constants::MAX_ITEM_BYTES,
+        ))
         .with_state(node)
 }
 
@@ -181,6 +200,7 @@ async fn votes(State(node): State<Arc<Node>>) -> Json<Vec<VoteSummary>> {
             open_block: v.open_block,
             close_block: v.close_block,
             min_ballots: v.min_ballots,
+            min_parties: v.min_parties,
             secrecy: format!("{:?}", v.secrecy).to_lowercase(),
             ballots: log.ballots_of(id).len(),
         })
@@ -284,16 +304,15 @@ async fn registries(State(node): State<Arc<Node>>) -> Json<Vec<RegistrySummary>>
     Json(out)
 }
 
-/// Body: snapshot (144 bytes) followed by the leaves file.
+/// Body: the snapshot followed by the leaves file. The snapshot is
+/// variable-length (it carries `authority_keys`), so its own decoder reports
+/// where it ends rather than the boundary being a constant.
 async fn post_registry(State(node): State<Arc<Node>>, body: Bytes) -> Response {
-    if body.len() < 144 {
-        return (StatusCode::BAD_REQUEST, "body too short").into_response();
-    }
-    let snapshot = match RegistrySnapshot::decode(&body[..144]) {
+    let (snapshot, used) = match RegistrySnapshot::decode_prefix(&body) {
         Ok(s) => s,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
-    let leaves = match decode_leaves(&body[144..]) {
+    let leaves = match decode_leaves(&body[used..]) {
         Ok(l) => l,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
@@ -333,6 +352,45 @@ async fn registry_leaves(
         Some(l) => octets(encode_leaves(l)),
         None => not_found(),
     }
+}
+
+/// One person's Merkle path: `index(u32) || siblings(32 × Fr)`, 1 028 bytes
+/// whatever the electorate's size.
+///
+/// The whole leaves file is the alternative, and at national scale it is
+/// hundreds of megabytes per ballot cast. Nothing is lost by not sending it:
+/// the client recomputes the root from `(commitment, index, siblings)` and
+/// compares it with the root the Issuer signed, so a node that lies about
+/// either the index or a sibling produces a root that does not match, exactly
+/// as a forged leaves file would (A58).
+async fn registry_path(
+    State(node): State<Arc<Node>>,
+    Path((issuer, root, commitment)): Path<(String, String, String)>,
+) -> Response {
+    let (Some(issuer), Some(root), Some(c)) =
+        (parse_id(&issuer), parse_fr(&root), parse_fr(&commitment))
+    else {
+        return not_found();
+    };
+    let log = node.log.lock().unwrap();
+    let Some(leaves) = log.registry_leaves(&(issuer, root)) else {
+        return not_found();
+    };
+    let Some(index) = leaves.iter().position(|l| *l == c) else {
+        return not_found();
+    };
+    let Some(tree) = log.registry_tree(&(issuer, root)) else {
+        return not_found();
+    };
+    let Some(siblings) = tree.path(index as u32) else {
+        return not_found();
+    };
+    let mut w = cv_core::encoding::Writer::new();
+    w.u32(index as u32);
+    for sib in &siblings {
+        w.fr(sib);
+    }
+    octets(w.into_inner())
 }
 
 async fn tip(State(node): State<Arc<Node>>) -> Json<Tip> {

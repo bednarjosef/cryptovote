@@ -95,6 +95,10 @@ pub struct VoteDefinition {
     pub close_block: u32,
     pub min_ballots: u32,
     pub secrecy: Secrecy,
+    /// Key parties a ballot must encrypt to (SPEC §6.1, §6.4). `0` under
+    /// `secrecy = none`; `1..=MAX_KEY_PARTIES` under `keyparties`, where it is
+    /// the floor the Issuer binds every voter to.
+    pub min_parties: u32,
     pub origin: Origin,
 }
 
@@ -106,6 +110,7 @@ pub struct Initiative {
     pub threshold_n: u32,
     pub support_deadline_block: u32,
     pub secrecy: Secrecy,
+    pub min_parties: u32,
     pub author: Fr,
     pub proof: Proof,
 }
@@ -243,6 +248,7 @@ fn encode_vote(v: &VoteDefinition, w: &mut Writer) -> usize {
     w.u32(v.close_block);
     w.u32(v.min_ballots);
     w.u8(v.secrecy as u8);
+    w.u32(v.min_parties);
     match &v.origin {
         Origin::Authority {
             authority_key,
@@ -275,6 +281,7 @@ fn decode_vote(r: &mut Reader) -> Result<VoteDefinition, DecodeError> {
     let close_block = r.u32()?;
     let min_ballots = r.u32()?;
     let secrecy = Secrecy::decode(r)?;
+    let min_parties = r.u32()?;
     let origin = match r.u8()? {
         0x00 => Origin::Authority {
             authority_key: r.fixed()?,
@@ -293,6 +300,7 @@ fn decode_vote(r: &mut Reader) -> Result<VoteDefinition, DecodeError> {
         open_block,
         close_block,
         min_ballots,
+        min_parties,
         secrecy,
         origin,
     })
@@ -305,6 +313,7 @@ fn encode_initiative(v: &Initiative, w: &mut Writer) -> usize {
     w.u32(v.threshold_n);
     w.u32(v.support_deadline_block);
     w.u8(v.secrecy as u8);
+    w.u32(v.min_parties);
     w.fr(&v.author);
     let c = w.len();
     w.fixed(&v.proof.0);
@@ -319,6 +328,7 @@ fn decode_initiative(r: &mut Reader) -> Result<Initiative, DecodeError> {
         threshold_n: r.u32()?,
         support_deadline_block: r.u32()?,
         secrecy: Secrecy::decode(r)?,
+        min_parties: r.u32()?,
         author: r.fr()?,
         proof: Proof(r.fixed()?),
     })

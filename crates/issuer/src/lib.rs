@@ -118,6 +118,8 @@ struct State {
     epoch: u64,
     leaves: Vec<String>,
     records: Vec<Record>,
+    #[serde(default)]
+    authority_keys: Vec<String>,
 }
 
 pub struct Issuer {
@@ -126,6 +128,11 @@ pub struct Issuer {
     records: Vec<Record>,
     by_dedup: HashMap<String, u32>,
     epoch: u64,
+    /// Who may call top-down votes over this electorate (SPEC §4.3). Empty is
+    /// the default and means none: this electorate votes only on initiatives
+    /// its own members raise. An Issuer that calls its own votes adds its own
+    /// key here.
+    authority_keys: Vec<[u8; 32]>,
     backend: Box<dyn VerificationBackend>,
 }
 
@@ -144,6 +151,7 @@ impl Issuer {
             records: Vec::new(),
             by_dedup: HashMap::new(),
             epoch: 1,
+            authority_keys: Vec::new(),
             backend,
         }
     }
@@ -214,7 +222,24 @@ impl Issuer {
     }
 
     pub fn snapshot(&self) -> RegistrySnapshot {
-        RegistrySnapshot::sign(&self.key, self.epoch, &self.tree)
+        RegistrySnapshot::sign(
+            &self.key,
+            self.epoch,
+            &self.tree,
+            self.authority_keys.clone(),
+        )
+    }
+
+    pub fn authority_keys(&self) -> &[[u8; 32]] {
+        &self.authority_keys
+    }
+
+    /// Replace the set of vote creators this electorate accepts. The epoch
+    /// advances so the next `snapshot()` is a new signed statement of it —
+    /// a key removed here cannot create votes against later snapshots.
+    pub fn set_authority_keys(&mut self, keys: Vec<[u8; 32]>) {
+        self.authority_keys = keys;
+        self.epoch += 1;
     }
 
     pub fn leaves(&self) -> &[Fr] {
@@ -232,6 +257,7 @@ impl Issuer {
                 .map(|l| hex::encode(fr_to_bytes(l)))
                 .collect(),
             records: self.records.clone(),
+            authority_keys: self.authority_keys.iter().map(hex::encode).collect(),
         };
         std::fs::write(
             path,
@@ -270,6 +296,11 @@ impl Issuer {
             records: st.records,
             by_dedup,
             epoch: st.epoch,
+            authority_keys: st
+                .authority_keys
+                .iter()
+                .filter_map(|k| hex::decode(k).ok()?.try_into().ok())
+                .collect(),
             backend,
         })
     }

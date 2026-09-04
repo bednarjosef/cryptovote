@@ -40,6 +40,7 @@ pub struct VoteSummary {
     pub open_block: u32,
     pub close_block: u32,
     pub min_ballots: u32,
+    pub min_parties: u32,
     pub secrecy: String,
     pub ballots: usize,
 }

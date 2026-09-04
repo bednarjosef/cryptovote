@@ -31,12 +31,16 @@ fn world() -> World {
     let issuer = SigningKey::from_seed(&[0x11u8; 32]);
     let issuer_key = issuer.public_key();
     let deployment = Deployment {
-        authority_keys: vec![authority.public_key()],
         issuer_keys: vec![issuer_key],
         dev_mode: true,
     };
     let mut ctx = MemoryContext::new(deployment, dev_keys());
-    ctx.add_registry(issuer_key, tree.root(), tree.leaf_count());
+    ctx.add_registry(
+        issuer_key,
+        tree.root(),
+        tree.leaf_count(),
+        vec![authority.public_key()],
+    );
     let vote = sign_vote_definition(
         &authority,
         VoteDefinition {
@@ -48,6 +52,7 @@ fn world() -> World {
             close_block: 200,
             min_ballots: 1,
             secrecy: Secrecy::None,
+            min_parties: 0,
             origin: Origin::Initiative {
                 initiative_id: [0; 32],
             },
@@ -131,6 +136,122 @@ fn vote_definition_validity() {
         validate_vote(&v, &w.ctx),
         Err(Invalid::MissingReference(Reference::Initiative(_)))
     ));
+    // Who may call a vote is the Issuer's to say, in the snapshot it signs
+    // (SPEC §4.3, A57). An authority that electorate never named is refused,
+    // however well-formed its signature is.
+    let stranger = SigningKey::from_seed(&[0x77u8; 32]);
+    let v = sign_vote_definition(&stranger, w.vote.clone());
+    assert_eq!(validate_vote(&v, &w.ctx), Err(Invalid::UnknownAuthority));
+
+    // An electorate that names nobody holds no top-down votes at all; its
+    // members can still raise initiatives.
+    let mut bare = MemoryContext::new(w.ctx.deployment.clone(), dev_keys());
+    bare.add_registry(w.issuer_key, w.tree.root(), w.tree.leaf_count(), Vec::new());
+    assert_eq!(
+        validate_vote(&w.vote, &bare),
+        Err(Invalid::UnknownAuthority),
+        "no authority named: initiatives only"
+    );
+
+    // `min_parties` must match the secrecy mode (SPEC §6.1, A52): a public
+    // vote has no parties to require, and a secret one must require at least
+    // one, or its ballots could declare an empty set and be readable by
+    // anyone at cast time.
+    let mut v = w.vote.clone();
+    v.min_parties = 1;
+    assert!(matches!(
+        validate_vote(&sign_vote_definition(&w.authority, v), &w.ctx),
+        Err(Invalid::Structure(_))
+    ));
+    let mut v = w.vote.clone();
+    v.secrecy = Secrecy::KeyParties;
+    v.min_parties = 0;
+    assert!(matches!(
+        validate_vote(&sign_vote_definition(&w.authority, v), &w.ctx),
+        Err(Invalid::Structure(_))
+    ));
+    let mut v = w.vote.clone();
+    v.secrecy = Secrecy::KeyParties;
+    v.min_parties = MAX_KEY_PARTIES as u32 + 1;
+    assert!(matches!(
+        validate_vote(&sign_vote_definition(&w.authority, v), &w.ctx),
+        Err(Invalid::Structure(_))
+    ));
+    let mut v = w.vote.clone();
+    v.secrecy = Secrecy::KeyParties;
+    v.min_parties = MAX_KEY_PARTIES as u32;
+    assert_eq!(
+        validate_vote(&sign_vote_definition(&w.authority, v), &w.ctx),
+        Ok(())
+    );
+}
+
+/// A ballot in a secret vote cannot opt out of the Issuer's floor (SPEC §6.4,
+/// A52). Declaring no parties makes `PK` the identity point, so `c2` is
+/// `option · G` and anyone reads the ballot the moment it is cast — the leak
+/// `keyparties` exists to prevent. The floor is checked on the ballot's own
+/// bytes, so no anchor arriving later can strand a ballot that was valid when
+/// it was cast (A38).
+#[test]
+fn a_secret_ballot_cannot_declare_too_few_key_parties() {
+    let mut w = world();
+    let mut rng = ChaCha20Rng::from_seed([0x5au8; 32]);
+
+    let vote = sign_vote_definition(
+        &w.authority,
+        VoteDefinition {
+            secrecy: Secrecy::KeyParties,
+            min_parties: 2,
+            ..w.vote.clone()
+        },
+    );
+    let vote_id = w.ctx.add_vote(vote.clone());
+    assert_eq!(validate_vote(&vote, &w.ctx), Ok(()));
+
+    // Two real key parties, so a ballot can actually meet the floor.
+    let mut parties: Vec<(Id, [u8; 32])> = Vec::new();
+    for i in [7usize, 8] {
+        let (kp, _sk) =
+            build_keyparty(dev_keys(), &participant(&w, i), &vote_id, 64, &mut rng).unwrap();
+        assert_eq!(validate_keyparty(&kp, &w.ctx), Ok(()));
+        parties.push((kp.content_id(), kp.pk));
+        w.ctx.add_keyparty(kp);
+    }
+    parties.sort();
+
+    // Zero parties: the identity-key ballot, and the whole point of the rule.
+    let p = participant(&w, 3);
+    let bare = keyparties_ballot(dev_keys(), &p, &vote, &[], 1).unwrap();
+    assert!(matches!(
+        validate_ballot(&bare, &w.ctx),
+        Err(Invalid::Structure("fewer key parties than min_parties"))
+    ));
+    // It really is plaintext-equivalent: no share is needed to read it.
+    let payload = KeyPartiesPayload::decode(&bare.payload).unwrap();
+    assert!(payload.party_ids.is_empty());
+    assert_eq!(
+        cv_core::keyparties::decrypt(&payload, &Default::default(), vote.options.len()),
+        Some(1),
+        "an empty party set leaves the option in the clear"
+    );
+
+    // One party: still under the floor, so still rejected.
+    let one = keyparties_ballot(dev_keys(), &p, &vote, &parties[..1], 1).unwrap();
+    assert!(matches!(
+        validate_ballot(&one, &w.ctx),
+        Err(Invalid::Structure("fewer key parties than min_parties"))
+    ));
+
+    // Meeting the floor is valid, and needs every declared share to open.
+    let full = keyparties_ballot(dev_keys(), &p, &vote, &parties, 1).unwrap();
+    assert_eq!(validate_ballot(&full, &w.ctx), Ok(()));
+    let payload = KeyPartiesPayload::decode(&full.payload).unwrap();
+    assert_eq!(payload.party_ids.len(), 2);
+    assert_eq!(
+        cv_core::keyparties::decrypt(&payload, &Default::default(), vote.options.len()),
+        None,
+        "without the shares the option is not recoverable"
+    );
 }
 
 #[test]
@@ -233,8 +354,12 @@ fn several_issuers_coexist() {
     // A smaller electorate made of some of the same people.
     let tree_b = RegistryTree::from_leaves(w.secrets[..8].iter().map(commitment).collect());
     w.ctx.deployment.issuer_keys.push(issuer_b);
-    w.ctx
-        .add_registry(issuer_b, tree_b.root(), tree_b.leaf_count());
+    w.ctx.add_registry(
+        issuer_b,
+        tree_b.root(),
+        tree_b.leaf_count(),
+        vec![w.authority.public_key()],
+    );
 
     // Issuer A's root is not Issuer B's root: naming B with A's root refers to
     // a registry that does not exist, rather than borrowing A's electorate.
@@ -325,7 +450,8 @@ fn several_issuers_coexist() {
     // The author pseudonym is scoped the same way: the same person authoring
     // in two electorates is two unlinkable pseudonyms.
     let n = initiative_threshold(w.tree.leaf_count());
-    let init_a = build_initiative(dev_keys(), &p_a, "Text".into(), n, 300, Secrecy::None).unwrap();
+    let init_a =
+        build_initiative(dev_keys(), &p_a, "Text".into(), n, 300, Secrecy::None, 0).unwrap();
     let init_b = build_initiative(
         dev_keys(),
         &p_b,
@@ -333,6 +459,7 @@ fn several_issuers_coexist() {
         initiative_threshold(tree_b.leaf_count()),
         300,
         Secrecy::None,
+        0,
     )
     .unwrap();
     assert_ne!(init_a.author, init_b.author);
@@ -352,6 +479,7 @@ fn supports_initiatives_nodes_witnesses() {
         n,
         300,
         Secrecy::None,
+        0,
     )
     .unwrap();
     assert_eq!(validate(&Item::Initiative(init.clone()), &w.ctx), Ok(()));
@@ -362,6 +490,7 @@ fn supports_initiatives_nodes_witnesses() {
         n + 1,
         300,
         Secrecy::None,
+        0,
     )
     .unwrap();
     assert!(matches!(
@@ -376,6 +505,7 @@ fn supports_initiatives_nodes_witnesses() {
         n,
         300,
         Secrecy::None,
+        0,
     )
     .unwrap();
     assert_eq!(init2.author, init.author);

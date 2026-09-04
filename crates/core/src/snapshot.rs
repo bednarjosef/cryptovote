@@ -2,7 +2,7 @@
 //! `Context` and `LogView`: what the verifier (and tests) tally over.
 
 use crate::DecodeError;
-use crate::constants::MAX_ITEM_BYTES;
+use crate::constants::{MAX_ITEM_BYTES, MAX_REGISTRY_SNAPSHOT_BYTES};
 use crate::context::{Context, Deployment, RegistryId, RegistryInfo};
 use crate::crypto::field::{Fr, fr_to_bytes};
 use crate::crypto::groth16::MembershipVerifier;
@@ -44,7 +44,9 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<(Vec<RegistrySnapshot>, Vec<Vec<u
     let n = r.list_len(1 << 20)?;
     let mut regs = Vec::with_capacity(n);
     for _ in 0..n {
-        regs.push(RegistrySnapshot::decode(&r.bytes(1024)?)?);
+        regs.push(RegistrySnapshot::decode(
+            &r.bytes(MAX_REGISTRY_SNAPSHOT_BYTES)?,
+        )?);
     }
     let n = r.list_len(1 << 28)?;
     let mut items = Vec::with_capacity(n);
@@ -143,6 +145,7 @@ impl SnapshotView {
                 (r.issuer_key, r.root),
                 RegistryInfo {
                     leaf_count: r.leaf_count,
+                    authority_keys: r.authority_keys.clone(),
                 },
             );
         } else {
@@ -270,7 +273,7 @@ impl Context for SnapshotView {
         &self.verifier
     }
     fn registry(&self, issuer_key: &[u8; 32], root: &Fr) -> Option<RegistryInfo> {
-        self.registries.get(&(*issuer_key, *root)).copied()
+        self.registries.get(&(*issuer_key, *root)).cloned()
     }
     fn vote(&self, id: &Id) -> Option<VoteDefinition> {
         self.votes.get(id).cloned()

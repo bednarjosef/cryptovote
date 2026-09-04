@@ -164,6 +164,7 @@ pub fn derive_vote(view: &impl LogView, initiative_id: &Id) -> Option<VoteDefini
         close_block: open + INITIATIVE_VOTE_BLOCKS,
         min_ballots: MIN_BALLOTS,
         secrecy: init.secrecy,
+        min_parties: init.min_parties,
         origin: Origin::Initiative {
             initiative_id: *initiative_id,
         },

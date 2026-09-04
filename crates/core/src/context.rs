@@ -11,16 +11,16 @@ use std::collections::HashMap;
 pub type RegistryId = ([u8; 32], Fr);
 
 /// A known Registry snapshot (only what validation needs).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegistryInfo {
     pub leaf_count: u64,
+    /// Who this Issuer accepts as a creator of top-down votes (SPEC §6.1).
+    pub authority_keys: Vec<[u8; 32]>,
 }
 
 /// Deployment constants.
 #[derive(Clone, Debug)]
 pub struct Deployment {
-    /// `// TRUST: authority keys for *creating* votes only (whitepaper §7)`.
-    pub authority_keys: Vec<[u8; 32]>,
     /// Issuers whose Registry snapshots this node or verifier stores. Empty
     /// means "any Issuer". Storage policy only, never a validity rule: an
     /// item is valid against the Registry of the Issuer *it names*, and every
@@ -90,9 +90,20 @@ impl MemoryContext {
         }
     }
 
-    pub fn add_registry(&mut self, issuer_key: [u8; 32], root: Fr, leaf_count: u64) {
-        self.registries
-            .insert((issuer_key, root), RegistryInfo { leaf_count });
+    pub fn add_registry(
+        &mut self,
+        issuer_key: [u8; 32],
+        root: Fr,
+        leaf_count: u64,
+        authority_keys: Vec<[u8; 32]>,
+    ) {
+        self.registries.insert(
+            (issuer_key, root),
+            RegistryInfo {
+                leaf_count,
+                authority_keys,
+            },
+        );
     }
 
     pub fn add_vote(&mut self, v: VoteDefinition) -> Id {
@@ -106,6 +117,12 @@ impl MemoryContext {
         self.initiatives.insert(id, i);
         id
     }
+
+    pub fn add_keyparty(&mut self, k: KeyParty) -> Id {
+        let id = k.content_id();
+        self.keyparties.insert(id, k);
+        id
+    }
 }
 
 impl Context for MemoryContext {
@@ -116,7 +133,7 @@ impl Context for MemoryContext {
         &self.keys.verifier
     }
     fn registry(&self, issuer_key: &[u8; 32], root: &Fr) -> Option<RegistryInfo> {
-        self.registries.get(&(*issuer_key, *root)).copied()
+        self.registries.get(&(*issuer_key, *root)).cloned()
     }
     fn vote(&self, id: &Id) -> Option<VoteDefinition> {
         self.votes.get(id).cloned()

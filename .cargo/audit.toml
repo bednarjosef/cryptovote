@@ -1,0 +1,16 @@
+# `cargo audit` configuration.
+#
+# Advisories ignored here must each have a reachability argument recorded in
+# DEPENDENCIES.md. The point of ignoring anything is that a real finding is not
+# lost in noise; an entry without a reason defeats that.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin attack (timing sidechannel) on `rsa` 0.9.10.
+    # Reached only through arti-client -> tor-keymgr -> tor-key-forge ->
+    # ssh-key-fork-arti. No CryptoVote code uses `rsa`: the timed commitments
+    # do their own modular arithmetic with `num-bigint-dig`, and the protocol
+    # holds no RSA private key an attacker could time. No fixed version exists
+    # upstream. Revisit when arti drops the dependency or `rsa` ships a fix.
+    "RUSTSEC-2023-0071",
+]

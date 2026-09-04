@@ -3,7 +3,7 @@
 //! `tally`; this module answers "is this item well-formed and proven".
 
 use crate::constants::*;
-use crate::context::Context;
+use crate::context::{Context, RegistryInfo};
 use crate::identity::*;
 use crate::items::*;
 use cv_crypto::field::Fr;
@@ -91,13 +91,35 @@ pub fn validate(item: &Item, ctx: &impl Context) -> Result<(), Invalid> {
 /// A registry root is usable by an item only through the Issuer the item
 /// names: the snapshot with that root must carry that Issuer's signature
 /// (SPEC §4.3). Returns the electorate size.
-fn require_registry(ctx: &impl Context, issuer_key: &[u8; 32], root: &Fr) -> Result<u64, Invalid> {
+fn require_registry(
+    ctx: &impl Context,
+    issuer_key: &[u8; 32],
+    root: &Fr,
+) -> Result<RegistryInfo, Invalid> {
     ctx.registry(issuer_key, root)
-        .map(|r| r.leaf_count)
         .ok_or(Invalid::MissingReference(Reference::Registry(
             *issuer_key,
             *root,
         )))
+}
+
+/// A secret vote must bind every ballot to a floor of key parties; a public
+/// one has none to bind (SPEC §6.1). Without a floor, a ballot may declare an
+/// empty party set, whose aggregate key is the identity point — the ciphertext
+/// is then `option · G`, readable by anyone the moment it is cast, which is
+/// exactly the leak `keyparties` exists to prevent (A52).
+fn check_min_parties(secrecy: Secrecy, min_parties: u32) -> Result<(), Invalid> {
+    let ok = match secrecy {
+        Secrecy::None => min_parties == 0,
+        Secrecy::KeyParties => min_parties >= 1 && min_parties <= MAX_KEY_PARTIES as u32,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(Invalid::Structure(
+            "min_parties does not match the secrecy mode",
+        ))
+    }
 }
 
 fn check_membership(
@@ -136,13 +158,18 @@ pub fn validate_vote(v: &VoteDefinition, ctx: &impl Context) -> Result<(), Inval
     if v.open_block >= v.close_block || v.close_block - v.open_block > MAX_VOTE_BLOCKS {
         return Err(Invalid::Structure("open/close blocks"));
     }
-    require_registry(ctx, &v.issuer_key, &v.registry_root)?;
+    check_min_parties(v.secrecy, v.min_parties)?;
+    let registry = require_registry(ctx, &v.issuer_key, &v.registry_root)?;
     match &v.origin {
         Origin::Authority {
             authority_key,
             signature,
         } => {
-            if !ctx.deployment().authority_keys.contains(authority_key) {
+            // Who may call a vote over an electorate is the Issuer's to say,
+            // in the snapshot it signs — not a constant compiled into nodes.
+            // An empty list means this electorate holds no top-down votes at
+            // all; only initiatives can produce one (A57).
+            if !registry.authority_keys.contains(authority_key) {
                 return Err(Invalid::UnknownAuthority);
             }
             if !verify(authority_key, Domain::Vote, &v.vote_id(), signature) {
@@ -174,10 +201,11 @@ pub fn validate_initiative(v: &Initiative, ctx: &impl Context) -> Result<(), Inv
     if v.text.is_empty() {
         return Err(Invalid::Structure("empty text"));
     }
-    let size = require_registry(ctx, &v.issuer_key, &v.registry_root)?;
+    let size = require_registry(ctx, &v.issuer_key, &v.registry_root)?.leaf_count;
     if v.threshold_n != initiative_threshold(size) {
         return Err(Invalid::Structure("threshold_N is not the protocol value"));
     }
+    check_min_parties(v.secrecy, v.min_parties)?;
     check_membership(
         ctx,
         v.registry_root,
@@ -224,6 +252,12 @@ pub fn validate_ballot(v: &Ballot, ctx: &impl Context) -> Result<(), Invalid> {
         Secrecy::KeyParties => {
             let p = KeyPartiesPayload::decode(&v.payload)
                 .map_err(|_| Invalid::Structure("keyparties payload"))?;
+            // The Issuer sets the floor; the voter cannot opt out of it (A52).
+            // Intrinsic on the ballot's own bytes, so no late-surfacing anchor
+            // can retroactively strand a ballot that was valid when cast (A38).
+            if (p.party_ids.len() as u32) < vote.min_parties {
+                return Err(Invalid::Structure("fewer key parties than min_parties"));
+            }
             for id in &p.party_ids {
                 let kp = ctx
                     .keyparty(id)

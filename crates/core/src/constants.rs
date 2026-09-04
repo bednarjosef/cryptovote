@@ -6,8 +6,22 @@ pub const REGISTRY_DEPTH: usize = 32;
 pub const MAX_OPTIONS: usize = 64;
 pub const MAX_VOTE_BLOCKS: u32 = 52_560;
 pub const MAX_ITEM_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_ANCHOR_LEAVES: usize = 1_000_000;
+/// Leaves in one Anchor. Bounded by what an item may hold: an Anchor is
+/// `leaves(list<[32]>) || proof`, so `MAX_ITEM_BYTES` is the real ceiling and
+/// this constant must stay under it or it describes anchors that cannot be
+/// encoded (A59). Several anchors per block are fine — the counting rule takes
+/// the earliest height covering an item, whoever published it.
+pub const MAX_ANCHOR_LEAVES: usize = 200_000;
+/// Largest registry a node accepts in one `POST /v1/registry`: the snapshot
+/// plus `leaf_count` × 32 bytes of leaves. Sized for a continental electorate
+/// (A58).
+pub const MAX_REGISTRY_BODY_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_KEY_PARTIES: usize = 32;
+/// Vote creators one Issuer may authorise over its electorate (SPEC §4.3).
+pub const MAX_AUTHORITY_KEYS: usize = 64;
+/// Longest encoded `RegistrySnapshot`: `epoch(8) + leaf_count(8) + root(32) +
+/// issuer_key(32) + list_len(4) + 32·MAX_AUTHORITY_KEYS + signature(64)`.
+pub const MAX_REGISTRY_SNAPSHOT_BYTES: usize = 148 + 32 * MAX_AUTHORITY_KEYS;
 pub const MAX_STRING_BYTES: usize = 65_536;
 pub const MAX_ENDPOINT_BYTES: usize = 256;
 

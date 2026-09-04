@@ -110,10 +110,13 @@ pub async fn run(cfg: SimConfig) -> anyhow::Result<SimReport> {
     let mut issuer = Issuer::dev([0x11u8; 32]);
     let mut issuer_b = Issuer::dev([0x22u8; 32]);
     let authority = SigningKey::from_seed(&[0x42u8; 32]);
+    // Each Issuer names the authority it accepts as a caller of votes over its
+    // own electorate (SPEC §4.3); nothing about that is a node's decision.
+    issuer.set_authority_keys(vec![authority.public_key()]);
+    issuer_b.set_authority_keys(vec![authority.public_key()]);
     let deployment = Deployment {
         // No issuer allowlist: this node carries any Issuer's registry, and
         // every item says which one it means.
-        authority_keys: vec![authority.public_key()],
         issuer_keys: Vec::new(),
         dev_mode: true,
     };
@@ -244,6 +247,7 @@ pub async fn run(cfg: SimConfig) -> anyhow::Result<SimReport> {
             close_block: 200,
             min_ballots: 1,
             secrecy: Secrecy::None,
+            min_parties: 0,
             origin: Origin::Initiative {
                 initiative_id: [0; 32],
             },
@@ -319,6 +323,7 @@ pub async fn run(cfg: SimConfig) -> anyhow::Result<SimReport> {
             close_block: 200,
             min_ballots: 1,
             secrecy: Secrecy::None,
+            min_parties: 0,
             origin: Origin::Initiative {
                 initiative_id: [0; 32],
             },
@@ -363,6 +368,7 @@ pub async fn run(cfg: SimConfig) -> anyhow::Result<SimReport> {
             "Ban leaf blowers".into(),
             180,
             Secrecy::None,
+            0,
         )
         .await?;
     let init_id = init.content_id();

@@ -35,9 +35,6 @@ struct Args {
     /// Node name for logs.
     #[arg(long, default_value = "node")]
     name: String,
-    /// Authority public keys allowed to create votes (hex, repeatable).
-    #[arg(long = "authority-key")]
-    authority_keys: Vec<String>,
     /// Issuers whose registries this node carries (hex, repeatable).
     /// Omit to carry any Issuer's registry; items always name their own.
     #[arg(long = "issuer-key")]
@@ -261,11 +258,6 @@ async fn main() -> anyhow::Result<()> {
         return run_subcommand(cmd).await;
     }
     let deployment = Deployment {
-        authority_keys: args
-            .authority_keys
-            .iter()
-            .map(|k| parse_key(k))
-            .collect::<Result<_, _>>()?,
         issuer_keys: args
             .issuer_keys
             .iter()
