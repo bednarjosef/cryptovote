@@ -11,6 +11,10 @@ pub enum Domain {
     Registry,
     /// Node transport messages (Phase 7).
     Transport,
+    /// A contributor attesting to one step of the Groth16 ceremony
+    /// (SPEC §16.6): payload = phase || index || challenge || response ||
+    /// beacon || name.
+    Ceremony,
 }
 
 impl Domain {
@@ -19,6 +23,7 @@ impl Domain {
             Domain::Vote => b"cryptovote/v1/sig/vote",
             Domain::Registry => b"cryptovote/v1/sig/registry",
             Domain::Transport => b"cryptovote/v1/sig/transport",
+            Domain::Ceremony => b"cryptovote/v1/sig/ceremony",
         }
     }
 

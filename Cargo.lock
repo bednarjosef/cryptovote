@@ -1404,6 +1404,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "cv-ceremony"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff",
+ "ark-groth16",
+ "ark-poly",
+ "ark-r1cs-std",
+ "ark-relations",
+ "ark-serialize",
+ "ark-snark",
+ "blake3",
+ "clap",
+ "cv-core",
+ "cv-crypto",
+ "hex",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "cv-client"
 version = "0.1.0"
 dependencies = [

@@ -169,6 +169,16 @@ pub fn render(report: &Report) -> String {
                 "  pending: {} key-party share(s) missing\n",
                 v.missing_shares.len()
             )),
+            // The Log contradicts itself. Nothing else in this protocol can
+            // produce this, so it is reported as a finding, not as a count.
+            "impossible" => out.push_str(&format!(
+                "  NO RESULT — THIS LOG CONTRADICTS ITSELF: {} distinct ballots over an\n\
+                 \x20 electorate of {}. Either the Groth16 parameters are compromised and\n\
+                 \x20 membership proofs are being forged, or this Issuer signed a leaf_count\n\
+                 \x20 its own registry does not have (A61).\n",
+                v.counted.unwrap_or(0),
+                v.electorate.unwrap_or(0)
+            )),
             other => out.push_str(&format!("  {other}\n")),
         }
     }

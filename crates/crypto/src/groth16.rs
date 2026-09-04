@@ -161,3 +161,110 @@ pub fn rerandomize<R: RngCore + CryptoRng>(
     p2.serialize_compressed(&mut out).ok()?;
     out.try_into().ok()
 }
+
+// --- What the ceremony is for -------------------------------------------
+//
+// Everything below works only against the *development* key, and only
+// because its setup randomness comes from a seed printed at the top of this
+// file. It is here so that the failure a ceremony prevents can be written
+// down as a test instead of described in prose: with the setup's secret
+// numbers, anyone produces a proof of a statement that is false, and no
+// verifier anywhere can tell it from an honest proof. There is no equivalent
+// function for ceremony parameters, because nobody holds the numbers.
+
+/// The development setup's toxic waste, recovered by replaying the seeded
+/// RNG in the order `ark_groth16` draws from it.
+struct DevWaste {
+    alpha: Fr,
+    beta: Fr,
+    gamma: Fr,
+    delta: Fr,
+    g1: ark_bn254::G1Projective,
+    g2: ark_bn254::G2Projective,
+}
+
+fn dev_waste() -> DevWaste {
+    use ark_ff::UniformRand;
+    let mut rng = ChaCha20Rng::from_seed(DEV_SETUP_SEED);
+    let w = DevWaste {
+        alpha: Fr::rand(&mut rng),
+        beta: Fr::rand(&mut rng),
+        gamma: Fr::rand(&mut rng),
+        delta: Fr::rand(&mut rng),
+        g1: ark_bn254::G1Projective::rand(&mut rng),
+        g2: ark_bn254::G2Projective::rand(&mut rng),
+    };
+    use ark_ec::CurveGroup;
+    assert_eq!(
+        (w.g1 * w.alpha).into_affine(),
+        dev_keys().vk().alpha_g1,
+        "the recovered development toxic waste does not match the development key"
+    );
+    w
+}
+
+/// Forge a proof of **any** statement against the development verifying key.
+///
+/// This is what holding the setup's secrets means: not a subtle weakening,
+/// but membership proofs for registry leaves that do not exist — ballots cast
+/// as people who never voted, byte-indistinguishable from honest ones and
+/// undetectable at any later date. Available here only because the
+/// development seed is public; the point of a ceremony is that no such
+/// function can be written for the parameters a deployment actually uses.
+pub fn dev_forge(public_inputs: &[Fr]) -> [u8; PROOF_BYTES] {
+    use ark_ec::{AffineRepr, CurveGroup};
+    use ark_ff::{Field, UniformRand};
+
+    let w = dev_waste();
+    let vk = dev_keys().vk();
+    // Deterministic, so a forged ballot is reproducible in a test.
+    let mut h = blake3::Hasher::new_derive_key("cryptovote/v1/dev-forge");
+    for x in public_inputs {
+        let mut b = Vec::new();
+        x.serialize_compressed(&mut b).expect("serialize input");
+        h.update(&b);
+    }
+    let mut rng = ChaCha20Rng::from_seed(*h.finalize().as_bytes());
+    let (a, b) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
+
+    // The verification equation, in the exponent over e(g1, g2):
+    //     a·b = α·β + γ·ic + δ·c
+    // Pick A and B freely, then solve for C. `ic` is not known as a scalar,
+    // but the point it multiplies is published, so C can still be formed.
+    let mut ic = vk.gamma_abc_g1[0].into_group();
+    for (x, p) in public_inputs.iter().zip(&vk.gamma_abc_g1[1..]) {
+        ic += *p * x;
+    }
+    let d_inv = w.delta.inverse().expect("delta is nonzero");
+    let proof = Proof::<Bn254> {
+        a: (w.g1 * a).into_affine(),
+        b: (w.g2 * b).into_affine(),
+        c: (w.g1 * ((a * b - w.alpha * w.beta) * d_inv) - ic * (w.gamma * d_inv)).into_affine(),
+    };
+    let mut out = Vec::with_capacity(PROOF_BYTES);
+    proof
+        .serialize_compressed(&mut out)
+        .expect("serialize proof");
+    out.try_into().expect("128 bytes")
+}
+
+#[cfg(test)]
+mod forgery_tests {
+    use super::*;
+
+    #[test]
+    fn toxic_waste_proves_a_statement_nobody_can_satisfy() {
+        // Five public inputs made up out of thin air: no registry, no leaf,
+        // no secret, no witness. The verifier accepts them anyway.
+        let inputs: Vec<Fr> = (1..=5u64).map(Fr::from).collect();
+        let forged = dev_forge(&inputs);
+        assert!(
+            verify(&dev_keys().verifier.pvk, &inputs, &forged),
+            "a compromised setup forges membership at will"
+        );
+        // And it is a forgery of *that* statement only, which is why a forger
+        // has to mint a fresh proof per ballot — not a limit worth anything.
+        let other: Vec<Fr> = (2..=6u64).map(Fr::from).collect();
+        assert!(!verify(&dev_keys().verifier.pvk, &other, &forged));
+    }
+}

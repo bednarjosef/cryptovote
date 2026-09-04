@@ -54,6 +54,11 @@ struct Args {
     /// Release mode: Esplora-style API for Bitcoin headers.
     #[arg(long, default_value = DEFAULT_HEADERS_API)]
     headers_api: String,
+    /// Release mode: BLAKE3 of the membership verifying key this deployment
+    /// trusts, as `cv-ceremony finalize` printed it. Not needed if the build
+    /// has `MEMBERSHIP_VK_BLAKE3` set; refused if it contradicts it.
+    #[arg(long)]
+    vk_hash: Option<String>,
     /// Release mode: checkpoint height (deployment constant).
     #[arg(long)]
     checkpoint_height: Option<u32>,
@@ -288,6 +293,11 @@ async fn main() -> anyhow::Result<()> {
         let pk = groth16::pk_from_bytes(&std::fs::read(dir.join("membership.pk"))?)
             .ok_or_else(|| anyhow::anyhow!("bad proving key"))?;
         let keys = Arc::new(MembershipKeys::from_proving_key(pk));
+        // The ceremony is worth nothing to anyone who will load whatever key
+        // they are handed (SPEC §18.7).
+        let vk_hash = args.vk_hash.as_deref().map(parse_key).transpose()?;
+        let pinned = cv_core::keys::check_pin(&keys.verifier, vk_hash)?;
+        tracing::info!("membership verifying key {}", hex::encode(pinned));
         let (h, hh) = (
             args.checkpoint_height
                 .ok_or_else(|| anyhow::anyhow!("release mode needs --checkpoint-height"))?,

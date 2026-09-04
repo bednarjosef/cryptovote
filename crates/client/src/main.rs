@@ -24,6 +24,11 @@ struct Args {
     /// Dev mode: use the insecure development proving keys.
     #[arg(long)]
     dev: bool,
+    /// Release: BLAKE3 of the membership verifying key this deployment
+    /// trusts, as `cv-ceremony finalize` printed it. Not needed if the build
+    /// has `MEMBERSHIP_VK_BLAKE3` set.
+    #[arg(long)]
+    vk_hash: Option<String>,
     /// Release: directory with `membership.pk`.
     #[arg(long)]
     keys_dir: Option<PathBuf>,
@@ -225,7 +230,12 @@ async fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("need --dev or --keys-dir"))?;
         let pk = groth16::pk_from_bytes(&std::fs::read(dir.join("membership.pk"))?)
             .ok_or_else(|| anyhow::anyhow!("bad proving key"))?;
-        Arc::new(groth16::MembershipKeys::from_proving_key(pk))
+        let keys = groth16::MembershipKeys::from_proving_key(pk);
+        // A voter who proves under a key the deployment did not choose has no
+        // ceremony behind their ballot at all (SPEC §18.7).
+        let vk_hash = args.vk_hash.as_deref().map(id).transpose()?;
+        cv_core::keys::check_pin(&keys.verifier, vk_hash)?;
+        Arc::new(keys)
     };
     let headers: Option<Arc<dyn cv_core::snapshot::Headers>> = match &args.headers {
         Some(p) => Some(Arc::new(cv_client::evidence::FileHeaders(

@@ -30,6 +30,12 @@ struct Args {
     /// Verifying key file (compressed arkworks encoding). Required unless --dev.
     #[arg(long)]
     vk: Option<PathBuf>,
+    /// BLAKE3 of the verifying key this deployment trusts, as
+    /// `cv-ceremony finalize` printed it. Required outside dev mode unless
+    /// the build has `MEMBERSHIP_VK_BLAKE3` set: a verifier that will accept
+    /// any key it is handed is checking arithmetic, not results.
+    #[arg(long)]
+    vk_hash: Option<String>,
     /// DEV MODE: mock headers up to --mock-tip and the insecure dev verifying key.
     #[arg(long)]
     dev: bool,
@@ -71,8 +77,16 @@ fn main() -> anyhow::Result<()> {
         dev_mode: args.dev,
     };
     let verifier = match (&args.vk, args.dev) {
-        (Some(p), _) => MembershipVerifier::from_bytes(&std::fs::read(p)?)
-            .ok_or_else(|| anyhow::anyhow!("bad verifying key"))?,
+        (Some(p), _) => {
+            let v = MembershipVerifier::from_bytes(&std::fs::read(p)?)
+                .ok_or_else(|| anyhow::anyhow!("bad verifying key"))?;
+            if !args.dev {
+                let pinned =
+                    cv_core::keys::check_pin(&v, args.vk_hash.as_deref().map(key).transpose()?)?;
+                eprintln!("membership verifying key {}", hex::encode(pinned));
+            }
+            v
+        }
         (None, true) => dev_verifier(),
         (None, false) => anyhow::bail!("--vk is required outside dev mode"),
     };

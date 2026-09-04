@@ -10,6 +10,7 @@ members = [
     "crates/issuer",
     "crates/sim",
     "crates/vtc",
+    "crates/ceremony",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ cv-node = { path = "crates/node" }
 cv-client = { path = "crates/client" }
 cv-verifier = { path = "crates/verifier" }
 cv-vtc = { path = "crates/vtc" }
+cv-ceremony = { path = "crates/ceremony" }
 
 # --- cryptographic primitives (Hard rule 1: never implemented here) ---
 blake3 = "1.8"
@@ -37,6 +39,7 @@ ark-ff = "0.6"
 ark-ec = "0.6"
 ark-std = "0.6"
 ark-serialize = "0.6"
+ark-poly = "0.6"
 ark-relations = "0.6"
 ark-r1cs-std = "0.6"
 ark-snark = "0.6"

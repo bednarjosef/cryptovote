@@ -36,6 +36,17 @@ pub enum Outcome {
     Pending {
         missing_shares: Vec<Id>,
     },
+    /// More distinct people voted than the electorate contains. Under the
+    /// rules this cannot happen: every ballot proves membership in the one
+    /// registry root the vote names, and one leaf yields one nullifier per
+    /// vote. Seeing it means either the Groth16 parameters are compromised
+    /// and proofs are being forged, or the Issuer signed a `leaf_count` its
+    /// own tree does not have. Reported instead of a count, because a count
+    /// from a Log that contradicts itself is not a result (A61).
+    Impossible {
+        counted: u64,
+        electorate: u64,
+    },
 }
 
 /// Duplicate rule (SPEC §7.1) over the *timely* items of one scope: groups
@@ -133,6 +144,18 @@ pub fn tally(view: &impl LogView, vote_id: &Id) -> Option<Outcome> {
         }
     }
     let counted: u64 = counts.iter().sum();
+    // The one consequence of forged membership proofs that is visible from
+    // the Log alone. It does not catch a forger who stays under the turnout
+    // headroom — nothing does — but ballot stuffing large enough to change a
+    // result in a high-turnout vote runs into it, and it costs one lookup.
+    if let Some(r) = view.registry(&vd.issuer_key, &vd.registry_root) {
+        if counted > r.leaf_count {
+            return Some(Outcome::Impossible {
+                counted,
+                electorate: r.leaf_count,
+            });
+        }
+    }
     if counted < vd.min_ballots as u64 {
         return Some(Outcome::BelowMinimum { counted });
     }
@@ -186,6 +209,7 @@ impl Outcome {
                 None,
                 missing_shares.iter().map(hex::encode).collect(),
             ),
+            Outcome::Impossible { counted, .. } => ("impossible", None, Some(*counted), vec![]),
         };
         crate::wire::ResultJson {
             vote_id: hex::encode(vote_id),
@@ -197,6 +221,10 @@ impl Outcome {
             counts,
             counted,
             missing_shares: missing,
+            electorate: match self {
+                Outcome::Impossible { electorate, .. } => Some(*electorate),
+                _ => None,
+            },
         }
     }
 }
