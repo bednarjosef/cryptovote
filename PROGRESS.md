@@ -775,3 +775,109 @@ is safe to expose directly.
 5. **The per-party secrecy label** promised by SPEC §10.4 is still unimplemented
    in the verifier, so a ballot that named an under-delayed key party is
    indistinguishable afterwards from one that did not.
+
+## The setup that could forge every ballot now has a ceremony  (2026-09-04)
+
+The audit's first unfixed item was that nothing in this repository could
+produce Groth16 parameters. Release mode demanded ceremony keys; the only way
+to make any was `setup(rng)` run by one person, who then held the numbers that
+forge membership proofs — ballots cast as people who exist and did not vote,
+byte-indistinguishable from honest ones and undetectable forever. It is the
+one property in this protocol that cannot be checked from the Log.
+
+**The failure is now a test, not a paragraph.** `cv_crypto::groth16::dev_forge`
+recovers the development setup's toxic waste from the public seed it is
+derived from and produces a valid proof of an arbitrary statement. Fed into
+the Log, forged ballots pass every rule the protocol has: the proof verifies,
+the nullifier is fresh, the anchor is in time, and `tally` returns them as a
+result (`crates/core/tests/tally.rs`).
+
+**`crates/ceremony` (`cv-ceremony`) implements the ceremony** — SPEC §18, a
+new section, so a transcript made by one implementation can be checked by
+another. Two phases, because the proving key contains sums `βuᵢ(τ) + αvᵢ(τ) +
+wᵢ(τ)` that no later participant can multiply `α` or `β` into: phase 1 fixes
+`τ, α, β` and knows nothing about the circuit; `prepare` forms the sums with
+no secret in it (a group-element inverse FFT turns published powers of `τ`
+into Lagrange coefficients at `τ`); phase 2 randomises `δ`. Each contributor
+proves knowledge of what it applied against a point derived from the previous
+step's digest, so a step cannot be replayed from someone else's; vectors are
+checked in one pairing each with batch scalars drawn from the digest of the
+*response*, never the challenge, or a contributor could aim a bad vector at a
+combination it knew would cancel.
+
+Phases close on a **beacon** whose randomness is public and recomputed by
+every verifier — a Bitcoin block hash at a pre-announced height, the clock
+this protocol already trusts (§9). A beacon adds no secret; it stops whoever
+runs the ceremony from grinding the last step until the parameters come out
+some way it wanted. A phase containing *only* beacons replays perfectly and
+is refused as unusable: its trapdoor is public.
+
+**Anyone replays the transcript.** `cv-ceremony verify` starts from the
+generators, checks every step, and prints who contributed and which verifying
+key came out — including for a ceremony still in progress, because a
+contributor who cannot check the chain they are extending is contributing
+blind. Steps carry an optional Ed25519 attestation (`Domain::Ceremony`),
+which adds nothing cryptographic and is the only thing that turns "one of
+them was honest" into a claim with names on it.
+
+**The pin is what makes any of it matter, and it was missing.** Release mode
+used to load whatever key file it was pointed at — the same security as
+having held no ceremony, since an attacker who can place a key file runs
+their own setup and keeps the secret. Binaries now take the expected BLAKE3
+of the verifying key from `MEMBERSHIP_VK_BLAKE3` compiled in, or `--vk-hash`
+as a deployment constant beside `--checkpoint-header`, and refuse to start
+with neither (A62). `MEMBERSHIP_VK_BLAKE3` is `None` here: no ceremony has
+been run for any deployment, so release mode does not start, which is the
+honest state rather than a regression.
+
+**One trace forgery leaves.** A vote names one `registry_root` and every
+ballot proves membership in it, so `counted ≤ leaf_count` is an invariant.
+`tally` now returns `Outcome::Impossible` instead of a result when it breaks,
+and the verifier says what it means. It is a backstop, not a defence: it
+fires only after a forger has cast more ballots than there are people, so
+anyone stuffing inside the turnout headroom — most of an electorate, in
+practice — is still invisible. A61.
+
+Measured at the degree the membership circuit needs (16 384; 8 499
+constraints, 6 instance wires):
+
+| step | cost |
+|---|---|
+| one phase-1 contribution | 73 s |
+| verifying one phase-1 step | 3.4 s |
+| `prepare`, and again in every verification | 157 s |
+| one phase-2 contribution | 12.4 s |
+| verifying one phase-2 step | 0.7 s |
+| self-test (prove and verify a real statement) | 1.6 s |
+
+Serial on purpose: arkworks' `parallel` feature would cut these severalfold
+but unifies across the workspace, and turning a phone's proving multithreaded
+is not a decision this change gets to make. Minutes, once, for a ceremony
+held once is the right side of that trade. The full-degree run is an
+`#[ignore]`d release gate (`cargo test -p cv-ceremony --release -- --ignored`);
+the everyday tests run the same code at small degrees, including a circuit
+with several public inputs, which is where the libsnark reduction's
+per-input extra row could go wrong unnoticed.
+
+**What this does not do, stated plainly:**
+
+1. **It cannot prove anyone deleted anything.** "At least one contributor per
+   phase was honest" is unfalsifiable by construction. The ceremony replaces
+   "trust one party" with "all of these named people conspired"; it does not
+   remove trust, it spreads it and makes the list public.
+2. **`cv-ceremony` is unaudited**, the second construction assembled here
+   rather than taken from a library (A60), for the same reason as `cv-vtc`:
+   no maintained MPC implementation speaks arkworks R1CS.
+3. **Phase 1 is our own.** Reusing the Perpetual Powers of Tau transcript
+   would bring far more contributors than this project will attract, and its
+   phase 1 is circuit-independent so it needs only an importer. Not done here
+   because the format cannot be checked without the multi-gigabyte file, and
+   guessing at a binary layout is the kind of mistake ASSUMPTIONS exists to
+   prevent. A deployment that wants the stronger phase 1 should write it.
+4. **It protects soundness, not secrecy.** Groth16 is perfectly
+   zero-knowledge, so the trapdoor forges ballots; it does not identify
+   voters. Ballot secrecy still rests on §10–§11 and the mix.
+5. **BN254 is not what it was.** Its security is now estimated near 100 bits
+   rather than the 128 originally claimed. That is a curve choice (§1.4),
+   untouched here, but a ceremony is a natural moment to revisit it, since
+   changing curves later means holding the ceremony again.

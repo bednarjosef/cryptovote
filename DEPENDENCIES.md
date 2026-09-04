@@ -12,6 +12,7 @@ Versions are pinned in the workspace `Cargo.toml`.
 | `blake3` | 1.8.7 | `H` outside circuits, ids, `K`, `derive_key` domain separation | Whitepaper names BLAKE3; official implementation; `derive_key` gives standard domain separation | Actively maintained (Aug 2026) |
 | `ark-bn254`, `ark-ff`, `ark-ec`, `ark-std`, `ark-serialize` | 0.6.0 | Field/curve arithmetic and canonical serialization for the proof system | Whitepaper allows Groth16; arkworks is the maintained pure-Rust Groth16 ecosystem, compiles to WASM and mobile | Maintained (Apr 2026) |
 | `ark-relations`, `ark-r1cs-std`, `ark-snark`, `ark-groth16` | 0.6.0 | R1CS circuit description, Groth16 prove/verify | Same ecosystem; verification is milliseconds, proving seconds on a phone (whitepaper §4) | Groth16 needs a per-circuit trusted setup (ASSUMPTIONS A24) |
+| `ark-poly` | 0.6.0 | Evaluation domains and the inverse FFT the ceremony runs over group elements (SPEC §18.4) | Same ecosystem, already present transitively; its FFT is generic over any type that can be scaled by a field element, which is exactly what turns published powers of `τ` into Lagrange coefficients at `τ` | Maintained (Apr 2026) |
 | `ark-crypto-primitives` | 0.6.0 (`crh`, `merkle_tree`, `sponge`, `constraints`) | Poseidon (native + gadget), Poseidon parameter generation (`find_poseidon_ark_and_mds`, Grain LFSR as in the reference), Merkle path gadget | Poseidon in-circuit per whitepaper §4; native and constraint versions share one parameter set | Maintained (Apr 2026) |
 | `chacha20poly1305` | 0.11.0 | `Enc_K` = XChaCha20-Poly1305 | Whitepaper §4 example; RustCrypto, audited | Maintained (Aug 2026) |
 | `ed25519-dalek` | 2.2.0 | Authority, Issuer, node signatures | Standard, audited. 3.0.0 (Jul 2026) exists; 2.x pinned because the rest of the ecosystem (sphinx-packet, arti) still resolves on it; revisit in Phase 7 | Maintained |
@@ -83,6 +84,17 @@ No `nargo`/`circom` toolchain is needed: the circuit is written as arkworks
 R1CS (whitepaper §15 lists Noir/Circom as examples; Groth16 over an R1CS
 description is the same class of construction and keeps the build inside
 `cargo`).
+
+## Constructions assembled here
+
+Hard rule 1 forbids implementing primitives, not protocols built from them.
+Two protocols are assembled in this repository, and both must be audited
+before binding use:
+
+| Crate | What it composes | Why it is not a dependency |
+|---|---|---|
+| `cv-vtc` | Verifiable timed commitments (SPEC §10) from `curve25519-dalek` and `num-bigint-dig` | No crate implements the construction (BLOCKERS #1) |
+| `cv-ceremony` | The Groth16 parameter ceremony (SPEC §18) from arkworks pairings, `ark-poly` and `blake3` | No maintained MPC implementation speaks arkworks R1CS: `snarkjs` is JavaScript over circom's format, and the bellman-era `powersoftau`/`phase2` crates are unmaintained and built on another field library. Interoperating would mean exporting this circuit to circom and matching its wire ordering exactly — the same quantity of unaudited code, somewhere a mistake is harder to see (ASSUMPTIONS A60) |
 
 ## Advisories
 

@@ -99,13 +99,17 @@ pub struct ResultJson {
     pub question: String,
     pub options: Vec<String>,
     pub secrecy: String,
-    /// "result" | "below_minimum" | "not_closed" | "pending" | "unknown".
-    /// Every counted ballot is anchored in Bitcoin at or before `close_block`;
-    /// there is no weaker mode (A16).
+    /// "result" | "below_minimum" | "not_closed" | "pending" | "impossible" |
+    /// "unknown". Every counted ballot is anchored in Bitcoin at or before
+    /// `close_block`; there is no weaker mode (A16).
     pub outcome: String,
     pub counts: Option<Vec<u64>>,
     pub counted: Option<u64>,
     pub missing_shares: Vec<String>,
+    /// Set only for "impossible": the size of the electorate the count
+    /// exceeded (A61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub electorate: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

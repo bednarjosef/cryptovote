@@ -30,6 +30,13 @@ an insecure Groth16 setup derived from a public seed, an issuer whose mock
 verification backend enrolls anyone, and dev anchors. Every binary prints a warning when started
 that way. Nothing produced in dev mode is trustworthy.
 
+The Groth16 parameter ceremony (SPEC §18) is implemented in `crates/ceremony`
+and is the second construction assembled here rather than taken from a
+library; like `cv-vtc` it must be audited before a binding ceremony is run
+with it. **No ceremony has been run for any deployment**, so release mode
+cannot start: it now refuses to load a verifying key it was not told to
+expect (`--vk-hash`, or `MEMBERSHIP_VK_BLAKE3` compiled in).
+
 ## Layout
 
 | Crate | Binary | What it is |
@@ -164,6 +171,69 @@ paths needs five registered hops; with fewer, or with hops that share an
 operator, ASN or country, the client still sends and tells you what it got
 ("3 mix hop(s), 2 path(s), same country").
 
+## The Groth16 ceremony
+
+Groth16 parameters are derived from secret numbers. Whoever knows them can
+produce a membership proof for a registry leaf they do not hold — a ballot
+cast as someone who exists and did not vote, indistinguishable from an honest
+one and undetectable forever after. It is the only property in this protocol
+that cannot be checked from the Log, which is why `cv_crypto::groth16` ships
+`dev_forge`: it recovers the *development* setup's secrets from their public
+seed and forges at will, so the failure is a test rather than a paragraph.
+
+A ceremony replaces the one party who would know those numbers with a chain
+of contributors. Each folds in randomness of its own and proves it did;
+the secret behind the result is everyone's multiplied together, so it stays
+unknown unless **every** contributor kept their share and they all colluded.
+One honest contributor per phase is enough, and nobody has to stay honest
+afterwards — there is nothing left to be honest about.
+
+```
+cv-ceremony --dir ceremony new                       # degree from the circuit; holds no secret
+cv-ceremony --dir ceremony contribute --name "Alice" --sign-seed <32-byte hex>
+cv-ceremony --dir ceremony contribute --name "Bob"   # pass the directory along; any number of these
+cv-ceremony --dir ceremony beacon --block 900000 --block-hash <hex>
+cv-ceremony --dir ceremony prepare                   # phase 1 -> phase 2, fixes the circuit
+cv-ceremony --dir ceremony contribute --name "Alice" # phase 2 needs its own honest contributor
+cv-ceremony --dir ceremony beacon --block 900144 --block-hash <hex>
+cv-ceremony --dir ceremony verify                    # anyone, at any point
+cv-ceremony --dir ceremony finalize --out keys/      # membership.pk, membership.vk, the pin to paste
+```
+
+At the degree the membership circuit needs (16 384), a phase-1 contribution
+takes about 75 seconds and a phase-2 one about 12; `prepare` takes about two
+and a half minutes, and so does a full `verify`, which re-runs it. Serial on
+purpose — arkworks' parallel feature would cut all of these severalfold but
+unifies across the workspace, and making a phone's proving multithreaded is
+not a decision the ceremony gets to make.
+
+`verify` replays the whole directory from the generators, checks every step,
+and prints who contributed and what verifying key came out. That replay is
+the entire assurance: not that the contributors were trustworthy, but that a
+stranger can confirm each really did fold something in, that nothing was
+inserted or reordered, and that these keys and no others are the result.
+
+Two things the ceremony does **not** do, both worth being clear about:
+
+- **It cannot prove anyone deleted anything.** "One of them was honest" is
+  unfalsifiable; contributors sign their steps so the claim at least has
+  names attached to it.
+- **It is worth nothing without the pin.** An attacker who can hand you a
+  different verifying key does not need anybody's secrets. Release binaries
+  refuse to run without `--vk-hash` or a compiled-in `MEMBERSHIP_VK_BLAKE3`.
+
+Beacon steps close each phase with a public value — a Bitcoin block hash at a
+pre-announced height, the clock this protocol already trusts. A beacon adds
+no secret; it stops whoever runs the ceremony from grinding the last step
+until the parameters come out some way they wanted.
+
+The full-size run against the real circuit is a release gate rather than a
+unit test, because it takes minutes:
+
+```
+cargo test -p cv-ceremony --release -- --ignored
+```
+
 ## Dependency advisories
 
 ```
@@ -179,7 +249,12 @@ One advisory is ignored, with the reachability argument recorded in
 Release mode refuses the shortcuts. It needs:
 
 - Groth16 keys from a ceremony (`--keys-dir` with `membership.pk`; the
-  verifier takes `--vk`). The development key's hash is pinned in
+  verifier takes `--vk`) **and the hash of the verifying key they must be**
+  (`--vk-hash`, or a build with `MEMBERSHIP_VK_BLAKE3` set). Without the
+  hash the binary refuses to start: loading whatever key file is on disk is
+  the same security as having held no ceremony at all, because an attacker
+  who can place a key file runs their own one-person setup and keeps the
+  secret that forges ballots (A62). The development key's hash is pinned in
   `crates/core/tests/vectors/circuit.json`.
 - Bitcoin headers: `--checkpoint-height`/`--checkpoint-header` (deployment
   constants) and an Esplora-style API (`--headers-api`, default

@@ -119,11 +119,47 @@ can produce a wrong result: an eclipsed voter is a missing ballot, never a
 forged one.
 
 **A24 — Groth16 trusted setup.** The whitepaper allows Groth16. Its
-circuit-specific setup is a trust assumption the whitepaper does not list.
-Dev mode generates the parameters from a fixed seed (insecure, labelled).
-Release builds load parameters from a file whose verifying-key hash is pinned
-in the source; producing that file (an MPC ceremony) is outside this
-repository. Recorded here so it is not forgotten.
+circuit-specific setup is a trust assumption the whitepaper does not list,
+and it is the only one in this protocol that cannot be checked after the
+fact: whoever knows the setup's secrets forges membership proofs, which is
+ballots cast as people who exist and did not vote, indistinguishable from
+honest ballots forever. Everything else here is recomputable from the Log; a
+forged proof is not.
+
+The ceremony that removes that party is now specified (SPEC §18) and
+implemented (`crates/ceremony`, A60). What remains assumed is what a ceremony
+cannot prove: that **at least one contributor per phase** drew unguessable
+randomness, destroyed it, and did not collude with all the others. Nobody can
+demonstrate having deleted a number, so the assumption is unfalsifiable by
+construction — the ceremony's whole contribution is to replace "trust this
+one party" with "all of these named people would have had to conspire", and
+to let any stranger check who they were and that each really did contribute
+(`cv-ceremony verify`).
+
+Dev mode still generates parameters from a fixed public seed and is labelled
+insecure everywhere; `cv_crypto::groth16::dev_forge` recovers that seed's
+toxic waste and forges at will, so the failure is a test rather than a
+paragraph. Release builds refuse to start without a pinned verifying-key hash
+(A62), because a ceremony protects only the people who use the key it
+produced.
+
+**Why keep Groth16 at all**, when proof systems exist that need no ceremony?
+Because every ballot carries its proof, forever: the Log stores it, anchors
+cover it, and the verifier checks every one. At 128 bytes, ten million
+ballots are 1.3 GB of proof; the setup-free alternatives are 2 KB
+(Halo2/IPA) to 100 KB (STARK) per proof, which is 20 GB to a terabyte, with
+verification to match. That is the whole reason the trust assumption is
+accepted rather than designed away.
+
+The alternative worth revisiting is a **universal** setup — PLONK-family,
+KZG — whose reference string is circuit-independent. It costs roughly 4×
+the proof size (still hundreds of bytes, not kilobytes) and buys two things
+this design would like: the existing Perpetual Powers of Tau transcript can
+be adopted wholesale, so the ceremony becomes someone else's much larger
+one, and the circuit can then change without holding another. That is a
+proof-system decision, not a ceremony one, and it is the right question to
+settle *before* a real ceremony is held, because a new circuit under Groth16
+means starting phase 2 again.
 
 ## Items, ids and duplicates
 
@@ -582,3 +618,54 @@ they belong to a reverse proxy, and pretending otherwise would suggest a node
 is safe to expose directly.
 
 **A28 — Receipt** is 8 Crockford-base32 characters of `H_B("receipt"; n || c)`.
+
+**A60 — The ceremony is implemented here, and it is the second exception to
+Hard rule 1.** No cryptographic primitive is implemented in this repository;
+the ceremony is not a primitive but it is a construction assembled from them
+(pairings, group exponentiation, BLAKE3), like `cv-vtc`, and it carries the
+same warning: it must be audited before a binding ceremony is run with it.
+
+It is implemented rather than delegated because there is nothing to delegate
+to. The maintained MPC implementations are `snarkjs` (JavaScript, `.zkey`)
+and the bellman-era `powersoftau`/`phase2` crates (unmaintained, a different
+field library). Neither speaks arkworks R1CS, and interoperating would mean
+exporting this circuit to circom's format and matching its wire ordering
+exactly — the same amount of unaudited code, in a place where a mistake is
+harder to see. Reusing an existing **phase 1** is a different and better
+proposition: the Perpetual Powers of Tau transcript for BN254 has far more
+contributors than this project will attract, its phase 1 is
+circuit-independent, and an importer for its format is perhaps 200 lines. It
+is not done here because the format cannot be verified against a real file
+without downloading multi-gigabyte transcripts, and guessing at a binary
+layout is exactly the kind of mistake this file exists to record. A
+deployment that wants the stronger phase 1 should write that importer and
+skip `cv-ceremony new`.
+
+**A61 — More ballots than the electorate has leaves is reported, not
+counted.** A vote names one `registry_root` and every ballot proves
+membership in it, so `counted ≤ leaf_count` is an invariant of the counting
+rule; one leaf yields one nullifier per vote, and a person with two leaves is
+two leaves. `tally` therefore returns `Outcome::Impossible` rather than a
+result when the invariant breaks, and the verifier prints what it means:
+either the Groth16 parameters are compromised and proofs are being forged, or
+the Issuer signed a `leaf_count` its own tree does not have.
+
+This is a backstop, not a defence, and it is important to be honest about how
+weak it is. It fires only after a forger has cast more ballots than there are
+people, so a forger who stays inside the turnout headroom — filling in for
+the people who did not vote, which in a real electorate is most of them — is
+invisible to it and to everything else. It costs one lookup, it makes
+large-scale stuffing publicly self-evident rather than merely suspected, and
+it is the only trace forgery leaves anywhere in the Log. `A24` is still the
+thing that keeps ballots honest.
+
+**A62 — Release mode refuses to run without a pinned verifying-key hash.**
+Before this, release mode demanded ceremony keys and then loaded whatever
+file it was pointed at, which is the same security as no ceremony: an
+attacker who can place a key file (or a `--keys-dir`) runs their own
+one-person setup and keeps the secret. Binaries now take the expected BLAKE3
+of the verifying key from `MEMBERSHIP_VK_BLAKE3` compiled into the build, or
+from `--vk-hash` as a deployment constant like `--checkpoint-header`, and
+refuse to start with neither. `MEMBERSHIP_VK_BLAKE3` is `None` in this
+repository because no ceremony has been run for any deployment; a deployment
+sets it after its own and ships that build.

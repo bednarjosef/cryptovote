@@ -13,6 +13,7 @@ pub mod headers;
 pub mod identity;
 pub mod items;
 pub mod keyparties;
+pub mod keys;
 pub mod registry;
 pub mod snapshot;
 pub mod tally;

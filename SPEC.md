@@ -1123,3 +1123,243 @@ anchor_id = 465ba7ed5a45d67b4c3ae199bc72273635fedb9c31167c5dbcdcefc7b14825dd
 ### 17.6 Poseidon tag fields
 
 See §3.1 table (decimal values are normative).
+
+## 18. Groth16 parameter ceremony
+
+Groth16 verification is a fixed number of pairings and its proofs are 128
+bytes because the verifier's work is folded into parameters derived from
+secret field elements `τ, α, β, γ, δ`. Whoever knows them produces a proof of
+any statement, true or false — here a membership proof for a registry leaf
+they do not hold, which is a ballot cast as somebody who exists and did not
+vote, byte-indistinguishable from an honest ballot and undetectable at any
+later date. **This is the only property in this protocol that cannot be
+checked from the Log.** §12's counting rule, §9's anchors and §7's set
+semantics are all recomputable from public data; a forged proof is not
+distinguishable from a real one by any amount of recomputation.
+
+The ceremony removes the party who would know those elements. Contributors
+each fold in randomness of their own and prove they did so; the secret behind
+the finished parameters is the *product* of everyone's, so it is unknown
+unless every contributor kept their share and they all colluded. One honest
+contributor per phase suffices, and nobody has to stay honest afterwards.
+
+What is at stake is **soundness only**. Groth16 is perfectly zero-knowledge:
+a proof's distribution does not depend on the witness, which is precisely why
+a simulator holding the trapdoor can produce proofs indistinguishable from
+real ones. Holding the setup's secrets therefore buys forged ballots, not
+identified voters — a compromised ceremony stuffs a vote, it does not
+de-anonymise one. Ballot secrecy rests on §10–§11 and the mix, not here.
+
+A ceremony is not a protocol item: it produces the constant of §1.4 and never
+appears in the Log. It is specified here so that a transcript produced by one
+implementation can be checked by another.
+
+### 18.1 Two phases
+
+Phase 1 is circuit-independent and fixes `τ, α, β`. Phase 2 is per circuit
+and fixes `δ`, with `γ = 1`.
+
+The split is forced: the proving key contains sums `β·uᵢ(τ) + α·vᵢ(τ) +
+wᵢ(τ)`, and once such a sum exists no later participant can multiply `α` or
+`β` into it, because the parts are no longer separable. So `α, β, τ` are
+fixed first, the sums are formed by a computation that has no secret in it
+(§18.4, `prepare`), and only `δ` remains to randomise.
+
+Both phases matter. Knowing `δ` forges proofs directly. Knowing `τ, α, β`
+also forges, because any published `[x/δ]₁` whose `x` those secrets let you
+evaluate yields `[1/δ]₁`. An honest contributor is needed in **each** phase,
+not in one of the two.
+
+`γ = 1` because the terms it would scale are published in full anyway;
+dividing them by a secret gives an attacker nothing they did not have.
+
+### 18.2 Building blocks
+
+`same_ratio((a₀, a₁) ∈ G1², (b₀, b₁) ∈ G2²)` is `e(a₀, b₁) = e(a₁, b₀)`,
+which holds exactly when `a₁/a₀ = b₁/b₀` as exponents. It is `false` when
+`a₀` or `b₀` is the identity.
+
+`point_from_digest(d, p) ∈ G2` for a 32-byte digest `d` and purpose byte `p`
+is `G2::rand(ChaCha20(H_B("ceremony/point"; d ‖ p)))` — a point whose discrete
+logarithm nobody knows and which nobody can predict before `d` exists.
+
+A **proof of knowledge** of a secret `x` against a challenge `d` and purpose
+`p` is `Pok = (s, s·x, r·x)` where `s ∈ G1` is the contributor's own random
+point and `r = point_from_digest(d, p)`. It verifies when `s`, `s·x` and
+`r·x` are all non-identity and `same_ratio((s, s·x), (r, r·x))`. Purposes are
+`τ = 0`, `α = 1`, `β = 2`, `δ = 3`. Without it, a contributor could republish
+someone else's step and appear to have added entropy while adding none.
+
+`batch_scalars(d, p, n)` is `n` scalars from `ChaCha20(H_B("ceremony/batch";
+d ‖ p))`. They batch a vector check into one pairing check. **They are
+derived from the digest of the response, never of the challenge**: a
+contributor who knew them while choosing its elements could aim a malformed
+vector at a combination that cancels.
+
+Two batched checks are used, with purposes disjoint from the `Pok` purposes:
+
+* `is_geometric(v, (b₀, b₁), d, p)`: with `c = batch_scalars(d, p, |v|−1)`,
+  `same_ratio((Σ cᵢ·vᵢ, Σ cᵢ·vᵢ₊₁), (b₀, b₁))` — every `v[i+1]` is `v[i]`
+  scaled by the exponent ratio of `b`. (`is_geometric_g2` is the same with
+  the vector in G2 and the ratio pair in G1.)
+* `is_scaled_by(u, v, (b₀, b₁), d, p)`: `same_ratio((Σ cᵢ·uᵢ, Σ cᵢ·vᵢ),
+  (b₀, b₁))` — every `v[i]` is `u[i]` scaled by that ratio.
+
+### 18.3 Phase 1 — powers of tau
+
+An **accumulator** of degree `d` (a power of two, `d ≥ 2`) is
+
+```
+tau_g1        [τⁱ]₁  for i = 0 ..= 2d−2      (2d−1 elements)
+tau_g2        [τⁱ]₂  for i = 0 ..= d−1
+alpha_tau_g1  [ατⁱ]₁ for i = 0 ..= d−1
+beta_tau_g1   [βτⁱ]₁ for i = 0 ..= d−1
+beta_g2       [β]₂
+```
+
+serialized in that order in arkworks canonical **compressed** form. Its
+digest is BLAKE3 of that encoding, and is the challenge the next contributor
+answers.
+
+The starting accumulator has every element equal to its group's generator
+(`τ = α = β = 1`). It contains no secret, which is why it is written down
+rather than trusted.
+
+A contribution draws `τⱼ, αⱼ, βⱼ` (each `≠ 0, 1`), sets `tau_g1[i] *= τⱼⁱ`,
+`tau_g2[i] *= τⱼⁱ`, `alpha_tau_g1[i] *= αⱼτⱼⁱ`, `beta_tau_g1[i] *= βⱼτⱼⁱ`,
+`beta_g2 *= βⱼ`, and publishes a `Pok` for each of the three secrets against
+the challenge.
+
+A step from `prev` to `next` is valid when all of:
+
+1. the degrees and lengths agree, and `prev`'s digest is the challenge;
+2. the three `Pok`s verify;
+3. `same_ratio((prev.tau_g1[1], next.tau_g1[1]), pok_τ.ratio)`, and likewise
+   `alpha_tau_g1[0]` under `pok_α` and `beta_tau_g1[0]` under `pok_β` —
+   each parameter moved by exactly the secret that was proven;
+4. `same_ratio((pok_β.s, pok_β.s·β), (prev.beta_g2, next.beta_g2))` — `β`
+   moved by the same secret in G2, checked with the G1 half of the proof
+   because both compared elements are in G2;
+5. `next` passes the standalone structure check below.
+
+**Structure check** (everything phase 2 relies on, re-derived from the
+accumulator alone, with `d = next`'s own digest):
+
+* shape as above, `tau_g1[0] = g₁`, `tau_g2[0] = g₂`, no element the identity;
+* `same_ratio((g₁, tau_g1[1]), (g₂, tau_g2[1]))` — one `τ` across both groups;
+* `same_ratio((g₁, beta_tau_g1[0]), (g₂, beta_g2))` — one `β` across both;
+* `is_geometric(tau_g1, (g₂, tau_g2[1]), d, 16)`,
+  `is_geometric_g2(tau_g2, (g₁, tau_g1[1]), d, 17)`,
+  `is_geometric(alpha_tau_g1, (g₂, tau_g2[1]), d, 18)`,
+  `is_geometric(beta_tau_g1, (g₂, tau_g2[1]), d, 19)`.
+
+### 18.4 Phase 2 — the circuit
+
+`prepare` maps a phase-1 accumulator and a circuit to starting parameters
+with `δ = 1`. It is deterministic and secret-free: every verifier recomputes
+it and compares, which is what makes the step trustworthy.
+
+Let the circuit be synthesized with `OptimizationGoal::Constraints` in setup
+mode and finalized, giving `l` instance variables (including the constant
+wire), `w` witness variables, `k` constraints and matrices `A, B, C`. Let
+`D = GeneralEvaluationDomain(k + l)` of size `n`, and `m = (l − 1) + w`. The
+accumulator's degree must be at least `n`, and `tau_g1[n] ≠ g₁` (otherwise
+`τⁿ = 1`, the domain's vanishing polynomial `Xⁿ − 1` vanishes at `τ`, and the
+`h` query is all identity).
+
+Lagrange coefficients at `τ` come from an inverse FFT over group elements:
+`(τ⁰ … τⁿ⁻¹)` is the domain's DFT of `(L₀(τ) … Lₙ₋₁(τ))`, so
+`lag = D.ifft(tau_g1[0..n])` and likewise for `tau_g2`, `alpha_tau_g1`,
+`beta_tau_g1`. Then, over `m + 1` wires,
+
+```
+a[i]   = Σⱼ A[j][i]·lag[j]                     (+ lag[k+i] for i < l)
+b1[i]  = Σⱼ B[j][i]·lag[j]      b2[i] likewise over lag_g2
+abc[i] = Σⱼ A[j][i]·lag_beta[j] + Σⱼ B[j][i]·lag_alpha[j] + Σⱼ C[j][i]·lag[j]
+                                               (+ lag_beta[k+i] for i < l)
+h[i]   = tau_g1[i+n] − tau_g1[i]               for i = 0 .. n−2
+```
+
+The extra `lag[k+i]` term for instance variables is the libsnark reduction's
+per-public-input row, which keeps the `A` polynomials linearly independent.
+The parameters are then `alpha_g1 = alpha_tau_g1[0]`, `beta_g1 =
+beta_tau_g1[0]`, `beta_g2`, `gamma_g2 = g₂`, `gamma_abc_g1 = abc[..l]`,
+`a_query = a`, `b_g1_query = b1`, `b_g2_query = b2`, `delta_g1 = g₁`,
+`delta_g2 = g₂`, `h_query = h`, `l_query = abc[l..]`, together with a
+**circuit digest** = BLAKE3 over `l`, `w` and every coefficient of `A, B, C`
+in order, which binds the parameters to one R1CS.
+
+A contribution draws `δⱼ ≠ 0, 1` and sets `delta_g1 *= δⱼ`, `delta_g2 *= δⱼ`,
+`h_query[i] /= δⱼ`, `l_query[i] /= δⱼ`, publishing one `Pok` for `δⱼ`.
+
+A step is valid when the fixed parts (circuit digest, `alpha_g1`, `beta_g1`,
+`beta_g2`, `gamma_g2`, `gamma_abc_g1`, the three queries) are byte-identical,
+the query lengths are unchanged, `prev`'s digest is the challenge, the `Pok`
+verifies, `delta_g1` and `delta_g2` are not the identity,
+`same_ratio((prev.delta_g1, next.delta_g1), pok.ratio)`,
+`same_ratio((g₁, next.delta_g1), (g₂, next.delta_g2))`, and — with `d =
+next`'s digest — `is_scaled_by(next.h_query, prev.h_query, pok.ratio, d, 32)`
+and `is_scaled_by(next.l_query, prev.l_query, pok.ratio, d, 33)`. Note the
+argument order: the queries carry `1/δ` and so move the other way.
+
+The finished parameters are the `ProvingKey` of §1.4 directly.
+
+### 18.5 Beacon steps
+
+A phase may be closed with a **beacon**: a contribution whose randomness is
+`ChaCha20(H_B("ceremony/beacon"; challenge ‖ source))` for a public `source`.
+It is verified by recomputing it and requiring byte equality.
+
+A beacon adds no secret and no honesty. Its only job is that the final
+parameters were not chosen: a coordinator who controls the last step could
+otherwise grind over responses until the result had some property it wanted.
+The source must be unpredictable when the ceremony is announced and public
+afterwards. A Bitcoin block hash at a pre-announced height is the natural
+choice here, because a deployment already trusts Bitcoin for §9; the
+canonical source string is then `"bitcoin <height> <hash-hex>"`.
+
+### 18.6 Transcript
+
+A ceremony is published as the accumulators and parameters at every step,
+plus one **step record** per transition:
+
+```
+Step = phase(u8) ‖ index(u32) ‖ challenge([32]) ‖ response([32])
+       ‖ beacon(bytes, empty for a secret contribution) ‖ name(string)
+       ‖ attestation(optional: public_key([32]) ‖ signature([64])) ‖ pok
+```
+
+Files are `"CVCEREMONY1\n" ‖ kind(u8) ‖ payload`, with kind 1 a phase-1
+accumulator, 2 a phase-1 step, 3 phase-2 parameters, 4 a phase-2 step.
+
+An attestation signs `phase ‖ index ‖ challenge ‖ response ‖ len(beacon) ‖
+beacon ‖ name` under `Domain::Ceremony` (§1.6). It is optional and adds
+nothing cryptographic; it is what turns "one of them was honest" into a claim
+with a name attached. A step carrying an attestation that does not verify is
+invalid.
+
+Replaying a transcript checks, in order: that phase 1 starts from the
+generators for its degree; every phase-1 step; that the phase-2 starting
+parameters are exactly what `prepare` gives for the final accumulator and the
+circuit; and every phase-2 step. Because each step names the digest of the
+one before it, no step can be inserted, dropped or reordered without every
+later digest changing.
+
+### 18.7 Pinning
+
+A ceremony protects only those who use the key it produced. An attacker able
+to hand a voter a different verifying key does not need anyone's toxic waste
+— they run a one-person setup and keep it. Software must therefore refuse a
+key it was not expecting.
+
+Release binaries take the expected BLAKE3 of the canonical compressed
+verifying key from a constant compiled into the binary
+(`MEMBERSHIP_VK_BLAKE3`) or, failing that, from `--vk-hash`, and refuse to
+start without one. The compiled-in form is the strong one: it travels with
+the software a voter installed. `--vk-hash` is a deployment constant like
+`--checkpoint-header` and trusts whoever wrote the command line, but still
+refuses a key substituted underneath a running deployment. If both are
+present and disagree, the binary refuses.
+
+Neither replaces reading the transcript. The pin says "this is the key I
+meant"; only a replay says where that key came from and who contributed.

@@ -479,3 +479,95 @@ fn initiative_derivation_and_snapshot_roundtrip() {
         .is_err()
     );
 }
+
+/// A forged ballot: an arbitrary nullifier, no leaf behind it, and a proof
+/// made with the development setup's toxic waste. It is what a compromised
+/// Groth16 ceremony buys, and it is indistinguishable from an honest ballot
+/// by every rule in this protocol (A61).
+fn forged_ballot(w: &World, n: u8, option: u8) -> Ballot {
+    let vote_id = w.vote.vote_id();
+    let mut tag = [0xEEu8; 32];
+    tag[0] = n;
+    let nullifier = fr_mod(&tag);
+    let mut b = Ballot {
+        vote_id,
+        nullifier,
+        payload: vec![option],
+        proof: Proof([0u8; 128]),
+    };
+    let content_id = b.content_id();
+    let stmt = cv_core::identity::MembershipStatement::new(
+        w.tree.root(),
+        nullifier,
+        cv_core::identity::TAG_BALLOT,
+        Some(&vote_id),
+        &content_id,
+    );
+    b.proof = Proof(groth16::dev_forge(&stmt.public_inputs()));
+    b
+}
+
+#[test]
+fn forged_ballots_are_accepted_until_they_outnumber_the_electorate() {
+    let w = world(true);
+    let mut v = view(&w);
+    let vid = w.vote.vote_id();
+    let electorate = w.tree.leaf_count();
+    assert_eq!(electorate, 24);
+
+    // Every rule the protocol has says yes: the proof verifies, the
+    // nullifier is fresh, the anchor is in time. Nothing distinguishes these
+    // from ballots cast by people. This is the failure a ceremony prevents,
+    // and there is no later check that finds it.
+    let forged: Vec<Ballot> = (0..electorate as u8)
+        .map(|i| forged_ballot(&w, i, 0))
+        .collect();
+    for b in &forged {
+        v.admit(Item::Ballot(b.clone()))
+            .expect("a forged ballot is a valid ballot");
+    }
+    let ids: Vec<Id> = forged.iter().map(|b| b.content_id()).collect();
+    v.admit(dev_anchor(&ids, 150)).unwrap();
+    assert_eq!(
+        tally(&v, &vid),
+        Some(Outcome::Result {
+            counts: vec![24, 0, 0],
+            counted: 24
+        }),
+        "a whole electorate's worth of forgeries counts as a result"
+    );
+
+    // One more, and the count says something the registry cannot support.
+    // That is the only trace forgery leaves in the Log — and it only appears
+    // once the forger has exceeded the entire electorate, which is why it is
+    // a backstop and not a defence.
+    let extra = forged_ballot(&w, 200, 1);
+    v.admit(Item::Ballot(extra.clone())).unwrap();
+    v.admit(dev_anchor(&[extra.content_id()], 151)).unwrap();
+    assert_eq!(
+        tally(&v, &vid),
+        Some(Outcome::Impossible {
+            counted: 25,
+            electorate: 24
+        })
+    );
+}
+
+#[test]
+fn an_honest_full_turnout_is_still_a_result() {
+    // The backstop must not fire on the one legitimate case that reaches the
+    // bound: everybody voting.
+    let w = world(true);
+    let mut v = view(&w);
+    let vid = w.vote.vote_id();
+    let ballots: Vec<Ballot> = (0..24).map(|i| ballot(&w, i, 0)).collect();
+    for b in &ballots {
+        v.admit(Item::Ballot(b.clone())).unwrap();
+    }
+    let ids: Vec<Id> = ballots.iter().map(|b| b.content_id()).collect();
+    v.admit(dev_anchor(&ids, 150)).unwrap();
+    let Some(Outcome::Result { counted, .. }) = tally(&v, &vid) else {
+        panic!("full turnout must still be a result")
+    };
+    assert_eq!(counted, 24);
+}
